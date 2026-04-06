@@ -2554,6 +2554,7 @@ type ChatDownloadSettings struct {
 	AACType        string
 	MVAudioType    string
 	LyricsFormat   string
+	SongZip        bool
 	AutoLyrics     bool
 	AutoCover      bool
 	AutoAnimated   bool
@@ -3148,10 +3149,12 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 	if lyricsFormat == "" {
 		lyricsFormat = defaultTelegramLyricsFormat
 	}
+	songZip := settings.SongZip
 	autoLyrics := settings.AutoLyrics
 	autoCover := settings.AutoCover
 	autoAnimated := settings.AutoAnimated
 	if !settings.SettingsInited {
+		songZip = false
 		autoLyrics = false
 		autoCover = false
 		autoAnimated = false
@@ -3161,6 +3164,7 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 		AACType:        aacType,
 		MVAudioType:    mvAudioType,
 		LyricsFormat:   lyricsFormat,
+		SongZip:        songZip,
 		AutoLyrics:     autoLyrics,
 		AutoCover:      autoCover,
 		AutoAnimated:   autoAnimated,
@@ -3258,6 +3262,13 @@ func (b *TelegramBot) toggleChatAutoCover(chatID int64) ChatDownloadSettings {
 func (b *TelegramBot) toggleChatAutoAnimated(chatID int64) ChatDownloadSettings {
 	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
 		current.AutoAnimated = !current.AutoAnimated
+		return current
+	})
+}
+
+func (b *TelegramBot) toggleChatSongZip(chatID int64) ChatDownloadSettings {
+	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
+		current.SongZip = !current.SongZip
 		return current
 	})
 }
@@ -3725,6 +3736,9 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if data == "setting_auto:animated" {
 		settings := b.toggleChatAutoAnimated(cb.Message.Chat.ID)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+	} else if data == "setting_song_zip" {
+		settings := b.toggleChatSongZip(cb.Message.Chat.ID)
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting:") {
 		// Backward compatibility for old callbacks.
 		format := strings.TrimPrefix(data, "setting:")
@@ -4024,8 +4038,24 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 				}
 				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
 				return
+			case "songzip", "song_zip", "songzip_toggle", "song_zip_toggle":
+				settings = b.toggleChatSongZip(chatID)
+				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				return
+			case "songzip_on", "song_zip_on", "songzip_zip", "song_zip_zip":
+				if !settings.SongZip {
+					settings = b.toggleChatSongZip(chatID)
+				}
+				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				return
+			case "songzip_off", "song_zip_off", "song_one", "song_onebyone", "song_one_by_one":
+				if settings.SongZip {
+					settings = b.toggleChatSongZip(chatID)
+				}
+				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				return
 			}
-			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated]", nil, replyToID)
+			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip]", nil, replyToID)
 			return
 		}
 		settings := b.getChatSettings(chatID)
@@ -5060,7 +5090,12 @@ func (b *TelegramBot) queueDownloadSongWithStorefront(chatID int64, songID strin
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
-	b.promptMediaTransfer(chatID, mediaTypeSong, songID, storefront, "", replyToID)
+	settings := b.getChatSettings(chatID)
+	mode := transferModeOneByOne
+	if settings.SongZip {
+		mode = transferModeZip
+	}
+	b.enqueueSongDownload(chatID, songID, storefront, replyToID, mode)
 }
 
 func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefront string, replyToID int, transferMode string) {
@@ -5070,6 +5105,9 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 	}
 	settings := b.getChatSettings(chatID)
 	transferMode = normalizeTransferModeForMedia(transferMode, mediaTypeSong, true)
+	if transferMode == transferModeZip && b.trySendCachedBundleZip(chatID, mediaTypeSong, songID, replyToID, settings) {
+		return
+	}
 	if transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
 		return
 	}
@@ -7458,11 +7496,16 @@ func settingButtonText(label string, active bool) string {
 
 func formatSettingsText(settings ChatDownloadSettings) string {
 	normalized := normalizeChatSettings(settings)
-	return fmt.Sprintf("Download settings:\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Auto extra: lyrics=%t cover=%t animated=%t",
+	songTransfer := "one-by-one"
+	if normalized.SongZip {
+		songTransfer = "zip"
+	}
+	return fmt.Sprintf("Download settings:\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Auto extra: lyrics=%t cover=%t animated=%t",
 		strings.ToUpper(normalized.Format),
 		normalized.AACType,
 		normalized.MVAudioType,
 		strings.ToUpper(normalized.LyricsFormat),
+		songTransfer,
 		normalized.AutoLyrics,
 		normalized.AutoCover,
 		normalized.AutoAnimated,
@@ -7503,6 +7546,9 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 				{Text: settingButtonText("Lyrics TTML", lyricsFormat == "ttml"), CallbackData: "setting_lyrics_format:ttml"},
 			},
 			{
+				{Text: settingButtonText("Song ZIP", normalized.SongZip), CallbackData: "setting_song_zip"},
+			},
+			{
 				{Text: settingButtonText("Auto Lyrics", normalized.AutoLyrics), CallbackData: "setting_auto:lyrics"},
 				{Text: settingButtonText("Auto Cover", normalized.AutoCover), CallbackData: "setting_auto:cover"},
 				{Text: settingButtonText("Auto Animated", normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
@@ -7528,7 +7574,7 @@ func botHelpText() string {
 /cv <url|type id> 仅下载封面
 /ac <url|type id> 仅下载动态封面
 /ly <song|album> 导出歌词文件（格式由设置决定）
-/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
+/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/自动附加）
 
 参数说明：
 - /s 的 <类型>：song | album | artist

@@ -113,7 +113,7 @@ docker run --rm -it \
    - `/cv <apple-music-url>` 或 `/cv <song|album|playlist|station|mv|artist> <id>` 仅下载封面
    - `/ac <apple-music-url>` 或 `/ac <song|album|playlist|station> <id>` 仅下载动态封面
    - `/ly <song-url|song-id|album-url|album <id>>` 导出歌词文件（格式由设置决定）
-   - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated]`
+   - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip]`
    - 旧命令仍可兼容使用：
    `/help /id /search_song /search_album /search_artist /search /url /artistphoto /cover /animatedcover /lyrics /settings`
 
@@ -129,7 +129,8 @@ docker run --rm -it \
 - 默认格式是 ALAC。`/settings` 已支持 ALAC/FLAC/AAC/Atmos，并可设置 AAC Profile 与 MV 音轨类型。
 - `/settings` 也支持歌词格式（`lrc`/`ttml`）与自动附加项开关（`lyrics`/`cover`/`animated`，默认全关）。
 - 艺人流程已支持二级选择：`Albums` 或 `Music Videos`。
-- Song/Album/Playlist/Station 统一支持 `逐个发送` 与 `ZIP` 两种传输方式。
+- Song 传输方式由 `/st songzip` 控制（开=ZIP，关=逐个），不再弹出二次选择。
+- Album/Playlist/Station 仍提供 `逐个发送` 与 `ZIP` 选择。
 - song/album/playlist/station 的 ZIP 会缓存 Telegram `file_id`，重复请求可秒传。
 - MV 支持优先 `video` 发送、失败回退 `document`，并支持 Telegram `file_id` 缓存复用。
 - ZIP 超过 Telegram 限制时会自动回退为逐个发送。
