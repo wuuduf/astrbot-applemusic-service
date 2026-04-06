@@ -7445,22 +7445,27 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 
 func botHelpText() string {
 	return strings.TrimSpace(`
-命令列表：
-/h                          帮助
-/i                          查看当前会话ID（chat_id）；带参数时按资源ID下载
-/sg <关键词>                搜索歌曲
-/sa <关键词>                搜索专辑
-/sr <关键词>                搜索艺人
-/s <类型> <关键词>          统一搜索（song|album|artist）
-/u <Apple Music 链接>       解析并下载链接
-/ap <艺人>                  仅下载艺人头像
-/cv <url|type id>           仅下载封面（song/album/playlist/station/mv/artist）
-/ac <url|type id>           仅下载动态封面（song/album/playlist/station）
-/ly <song|album>            导出歌词文件（格式由设置决定）
-/st [值]                    查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
+命令列表（短命令）：
+/h 帮助
+/i 查看当前会话ID（chat_id）；也可按资源ID下载
+/sg <关键词> 搜索歌曲
+/sa <关键词> 搜索专辑
+/sr <关键词> 搜索艺人
+/s <类型> <关键词> 统一搜索
+/u <Apple Music 链接> 解析并下载链接
+/ap <艺人-url|艺人-id> 仅下载艺人头像
+/cv <url|type id> 仅下载封面
+/ac <url|type id> 仅下载动态封面
+/ly <song|album> 导出歌词文件（格式由设置决定）
+/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
 
-也支持直接发送 Apple Music 链接：
-- song / album / playlist / artist / station / music-video
+参数说明：
+- /s 的 <类型>：song | album | artist
+- /cv 的 type：song | album | playlist | station | mv | artist
+- /ac 的 type：song | album | playlist | station
+
+也支持直接发送 Apple Music 链接（自动识别）：
+song | album | playlist | artist | station | music-video
 `)
 }
 
