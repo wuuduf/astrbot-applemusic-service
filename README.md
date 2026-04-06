@@ -172,6 +172,7 @@ Notes:
 - MV supports send-as-video, fallback-to-document, and Telegram `file_id` cache re-send.
 - If ZIP is too large for Telegram, the bot falls back to one-by-one transfer automatically.
 - If the download folder exceeds the limit, older files are removed (default 3GB; set `telegram-download-max-gb`, Telegram cache remains).
+- If `AMDL_TMPDIR`/`TMPDIR` is set (and not `/tmp` or `/var/tmp`), that temp directory is included in the same cleanup threshold.
 - ZIP temp files prefer download directories first (fallback to system temp). You can force temp directory via `AMDL_TMPDIR=/path/to/dir`.
 - Large files are re-encoded to fit `telegram-max-file-mb` in FLAC mode (quality may be reduced).
 - `/animatedcover` returns a clear reminder when the target has no animated artwork.

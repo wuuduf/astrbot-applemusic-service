@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - Telegram song download now supports transfer selection (`one` / `zip`) like collections.
 - AstrBot API download now allows `transfer_mode=zip` for `song` targets.
 - Unauthorized reply now includes `chat_id` hint to help configure `telegram-allowed-chat-ids`.
+- Telegram auto-cleanup now also considers `AMDL_TMPDIR`/`TMPDIR` when set to dedicated paths (shared `/tmp` and `/var/tmp` are skipped).
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.

@@ -5456,6 +5456,8 @@ func telegramCleanupRoots() []string {
 		strings.TrimSpace(Config.AlacSaveFolder),
 		strings.TrimSpace(Config.AtmosSaveFolder),
 		strings.TrimSpace(Config.AacSaveFolder),
+		strings.TrimSpace(os.Getenv("AMDL_TMPDIR")),
+		strings.TrimSpace(os.Getenv("TMPDIR")),
 	}
 	roots := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
@@ -5465,6 +5467,10 @@ func telegramCleanupRoots() []string {
 		}
 		clean := filepath.Clean(dir)
 		if clean == "" {
+			continue
+		}
+		// Avoid cleaning shared system temp roots by size threshold.
+		if clean == "/tmp" || clean == "/var/tmp" {
 			continue
 		}
 		if _, ok := seen[clean]; ok {
