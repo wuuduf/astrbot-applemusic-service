@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - MV download/send flow with cache-aware re-send.
 - Telegram settings support for `alac`, `flac`, `aac`, `atmos`, `aac-type`, `mv-audio-type`.
 - `config.example.yaml` and open-source governance files.
+- Telegram settings panel now includes an `Exit and delete` button to close the panel quickly.
 
 ### Changed
 - Telegram cache now supports song audio + MV + ZIP bundle `file_id`.

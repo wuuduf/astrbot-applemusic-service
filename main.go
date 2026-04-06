@@ -3720,6 +3720,12 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if data == "setting_auto:animated" {
 		settings := b.toggleChatAutoAnimated(cb.Message.Chat.ID)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+	} else if data == "setting_exit" || data == "setting_close" {
+		if err := b.deleteMessage(cb.Message.Chat.ID, cb.Message.MessageID); err != nil {
+			_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, "设置面板已关闭。", nil)
+		}
+		_ = b.answerCallbackQuery(cb.ID)
+		return
 	} else if strings.HasPrefix(data, "setting:") {
 		// Backward compatibility for old callbacks.
 		format := strings.TrimPrefix(data, "setting:")
@@ -7438,6 +7444,9 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 				{Text: settingButtonText("Auto Lyrics", normalized.AutoLyrics), CallbackData: "setting_auto:lyrics"},
 				{Text: settingButtonText("Auto Cover", normalized.AutoCover), CallbackData: "setting_auto:cover"},
 				{Text: settingButtonText("Auto Animated", normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
+			},
+			{
+				{Text: "退出并删除", CallbackData: "setting_exit"},
 			},
 		},
 	}
