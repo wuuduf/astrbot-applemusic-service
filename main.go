@@ -3690,6 +3690,11 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 		return
 	}
 	data := strings.TrimSpace(cb.Data)
+	if data == "panel_cancel" || data == "setting_exit" || data == "setting_close" {
+		b.cancelPanelAndDelete(cb.Message.Chat.ID, cb.Message.MessageID)
+		_ = b.answerCallbackQuery(cb.ID)
+		return
+	}
 	if strings.HasPrefix(data, "sel:") {
 		numStr := strings.TrimPrefix(data, "sel:")
 		if n, err := strconv.Atoi(numStr); err == nil {
@@ -3720,12 +3725,6 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if data == "setting_auto:animated" {
 		settings := b.toggleChatAutoAnimated(cb.Message.Chat.ID)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
-	} else if data == "setting_exit" || data == "setting_close" {
-		if err := b.deleteMessage(cb.Message.Chat.ID, cb.Message.MessageID); err != nil {
-			_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, "设置面板已关闭。", nil)
-		}
-		_ = b.answerCallbackQuery(cb.ID)
-		return
 	} else if strings.HasPrefix(data, "setting:") {
 		// Backward compatibility for old callbacks.
 		format := strings.TrimPrefix(data, "setting:")
@@ -3748,6 +3747,15 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 		}
 	}
 	_ = b.answerCallbackQuery(cb.ID)
+}
+
+func (b *TelegramBot) cancelPanelAndDelete(chatID int64, messageID int) {
+	b.clearPendingByMessage(chatID, messageID)
+	b.clearPendingTransferByMessage(chatID, messageID)
+	b.clearPendingArtistModeByMessage(chatID, messageID)
+	if err := b.deleteMessage(chatID, messageID); err != nil {
+		_ = b.editMessageText(chatID, messageID, "已取消。", nil)
+	}
 }
 
 func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
@@ -7259,6 +7267,21 @@ func (b *TelegramBot) clearPending(chatID int64) {
 	delete(b.pending, chatID)
 }
 
+func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
+	if messageID == 0 {
+		return
+	}
+	b.pendingMu.Lock()
+	defer b.pendingMu.Unlock()
+	pending, ok := b.pending[chatID]
+	if !ok {
+		return
+	}
+	if pending.ResultsMessageID == messageID {
+		delete(b.pending, chatID)
+	}
+}
+
 func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID string, mediaName string, storefront string, replyToID int, messageID int) {
 	b.transferMu.Lock()
 	defer b.transferMu.Unlock()
@@ -7286,6 +7309,21 @@ func (b *TelegramBot) clearPendingTransfer(chatID int64) {
 	delete(b.pendingTransfers, chatID)
 }
 
+func (b *TelegramBot) clearPendingTransferByMessage(chatID int64, messageID int) {
+	if messageID == 0 {
+		return
+	}
+	b.transferMu.Lock()
+	defer b.transferMu.Unlock()
+	pending, ok := b.pendingTransfers[chatID]
+	if !ok {
+		return
+	}
+	if pending.MessageID == messageID {
+		delete(b.pendingTransfers, chatID)
+	}
+}
+
 func (b *TelegramBot) setPendingArtistMode(chatID int64, artistID string, artistName string, storefront string, replyToID int, messageID int) {
 	b.artistModeMu.Lock()
 	defer b.artistModeMu.Unlock()
@@ -7310,6 +7348,21 @@ func (b *TelegramBot) clearPendingArtistMode(chatID int64) {
 	b.artistModeMu.Lock()
 	defer b.artistModeMu.Unlock()
 	delete(b.pendingArtistModes, chatID)
+}
+
+func (b *TelegramBot) clearPendingArtistModeByMessage(chatID int64, messageID int) {
+	if messageID == 0 {
+		return
+	}
+	b.artistModeMu.Lock()
+	defer b.artistModeMu.Unlock()
+	pending, ok := b.pendingArtistModes[chatID]
+	if !ok {
+		return
+	}
+	if pending.MessageID == messageID {
+		delete(b.pendingArtistModes, chatID)
+	}
 }
 
 func parseCommand(text string) (string, []string, bool) {
@@ -7360,6 +7413,9 @@ func buildInlineKeyboard(count int, hasPrev bool, hasNext bool) InlineKeyboardMa
 	if len(navRow) > 0 {
 		rows = append(rows, navRow)
 	}
+	rows = append(rows, []InlineKeyboardButton{
+		{Text: "取消并删除", CallbackData: "panel_cancel"},
+	})
 	return InlineKeyboardMarkup{
 		InlineKeyboard: rows,
 	}
@@ -7372,6 +7428,9 @@ func buildTransferKeyboard() InlineKeyboardMarkup {
 				{Text: "Transfer one by one", CallbackData: "transfer:one"},
 				{Text: "ZIP", CallbackData: "transfer:zip"},
 			},
+			{
+				{Text: "取消并删除", CallbackData: "panel_cancel"},
+			},
 		},
 	}
 }
@@ -7382,6 +7441,9 @@ func buildArtistModeKeyboard() InlineKeyboardMarkup {
 			{
 				{Text: "Albums", CallbackData: "artist_rel:albums"},
 				{Text: "Music Videos", CallbackData: "artist_rel:music-videos"},
+			},
+			{
+				{Text: "取消并删除", CallbackData: "panel_cancel"},
 			},
 		},
 	}
@@ -7446,7 +7508,7 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 				{Text: settingButtonText("Auto Animated", normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
 			},
 			{
-				{Text: "退出并删除", CallbackData: "setting_exit"},
+				{Text: "取消并删除", CallbackData: "panel_cancel"},
 			},
 		},
 	}
