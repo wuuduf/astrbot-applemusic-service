@@ -5380,47 +5380,70 @@ type downloadFileEntry struct {
 }
 
 func (b *TelegramBot) cleanupDownloadsIfNeeded() {
-	root := strings.TrimSpace(Config.AlacSaveFolder)
-	if root == "" {
-		return
-	}
-	cleanRoot := filepath.Clean(root)
-	if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
-		fmt.Printf("Skip cleanup for unsafe download folder: %s\n", root)
-		return
-	}
-	info, err := os.Stat(cleanRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return
-		}
-		fmt.Printf("Download folder check failed: %v\n", err)
-		return
-	}
-	if !info.IsDir() {
-		return
-	}
-	totalSize, files, err := scanDownloadFolder(cleanRoot, Config.TelegramCacheFile)
-	if err != nil {
-		fmt.Printf("Download folder scan failed: %v\n", err)
-		return
-	}
-	maxBytes := telegramDownloadMaxBytes()
-	if totalSize <= maxBytes {
-		return
-	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.Before(files[j].modTime)
-	})
-	for _, entry := range files {
-		if totalSize <= maxBytes {
-			break
-		}
-		if err := os.Remove(entry.path); err != nil {
+	for _, root := range telegramCleanupRoots() {
+		cleanRoot := filepath.Clean(root)
+		if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
+			fmt.Printf("Skip cleanup for unsafe download folder: %s\n", root)
 			continue
 		}
-		totalSize -= entry.size
+		info, err := os.Stat(cleanRoot)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Printf("Download folder check failed: %v\n", err)
+			}
+			continue
+		}
+		if !info.IsDir() {
+			continue
+		}
+		totalSize, files, err := scanDownloadFolder(cleanRoot, Config.TelegramCacheFile)
+		if err != nil {
+			fmt.Printf("Download folder scan failed: %v\n", err)
+			continue
+		}
+		maxBytes := telegramDownloadMaxBytes()
+		if totalSize <= maxBytes {
+			continue
+		}
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].modTime.Before(files[j].modTime)
+		})
+		for _, entry := range files {
+			if totalSize <= maxBytes {
+				break
+			}
+			if err := os.Remove(entry.path); err != nil {
+				continue
+			}
+			totalSize -= entry.size
+		}
 	}
+}
+
+func telegramCleanupRoots() []string {
+	candidates := []string{
+		strings.TrimSpace(Config.TelegramDownloadFolder),
+		strings.TrimSpace(Config.AlacSaveFolder),
+		strings.TrimSpace(Config.AtmosSaveFolder),
+		strings.TrimSpace(Config.AacSaveFolder),
+	}
+	roots := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		if clean == "" {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		roots = append(roots, clean)
+	}
+	return roots
 }
 
 func scanDownloadFolder(root string, cacheFile string) (int64, []downloadFileEntry, error) {
@@ -5463,7 +5486,11 @@ func createZipFromPaths(paths []string) (string, string, error) {
 		return "", "", fmt.Errorf("no files to zip")
 	}
 	displayName := zipDisplayName(paths)
-	tmp, err := os.CreateTemp("", "amdl-*.zip")
+	tmpDir := chooseZipTempDir(paths)
+	tmp, err := os.CreateTemp(tmpDir, "amdl-*.zip")
+	if err != nil && tmpDir != "" {
+		tmp, err = os.CreateTemp("", "amdl-*.zip")
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -5524,6 +5551,46 @@ func createZipFromPaths(paths []string) (string, string, error) {
 		return "", "", fmt.Errorf("no files to zip")
 	}
 	return tmpPath, displayName, nil
+}
+
+func chooseZipTempDir(paths []string) string {
+	candidates := []string{}
+	if envDir := strings.TrimSpace(os.Getenv("AMDL_TMPDIR")); envDir != "" {
+		candidates = append(candidates, envDir)
+	}
+	if root := commonZipRoot(paths); root != "" {
+		candidates = append(candidates, root)
+	}
+	candidates = append(candidates,
+		strings.TrimSpace(Config.TelegramDownloadFolder),
+		strings.TrimSpace(Config.AlacSaveFolder),
+		strings.TrimSpace(Config.AtmosSaveFolder),
+		strings.TrimSpace(Config.AacSaveFolder),
+	)
+	seen := make(map[string]struct{}, len(candidates))
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		if clean == "." || clean == string(filepath.Separator) {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		info, err := os.Stat(clean)
+		if err == nil && info.IsDir() {
+			return clean
+		}
+		if os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(clean, 0755); mkErr == nil {
+				return clean
+			}
+		}
+	}
+	return ""
 }
 
 func zipDisplayName(paths []string) string {

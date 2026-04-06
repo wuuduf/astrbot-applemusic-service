@@ -98,6 +98,7 @@ docker run --rm -it \
 - MV 支持优先 `video` 发送、失败回退 `document`，并支持 Telegram `file_id` 缓存复用。
 - ZIP 超过 Telegram 限制时会自动回退为逐个发送。
 - 下载目录超过限制会自动清理旧文件（默认 3GB，可设置 `telegram-download-max-gb`，不影响 Telegram 缓存）。
+- ZIP 临时文件会优先写入下载目录（失败才回退系统临时目录）。可通过 `AMDL_TMPDIR=/path/to/dir` 强制指定临时目录。
 - 超过限制的文件会在 FLAC 模式下重新压缩到 `telegram-max-file-mb`（音质可能下降）。
 - `/animatedcover` 在目标没有动态封面时会明确提示。
 - `/lyrics` 支持 song/album；album 导出支持逐个发送或 ZIP（ZIP 超限自动回退逐个发送）。
