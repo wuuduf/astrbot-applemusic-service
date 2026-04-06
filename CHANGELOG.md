@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - `config.example.yaml` and open-source governance files.
 - Telegram settings panel now includes an `Exit and delete` button to close the panel quickly.
 - Telegram interactive panels now include a unified `Cancel and delete` button (search, paging, transfer mode, artist sub-selection, settings).
+- `/artistphoto` (`/ap`) now supports exporting artist profile image plus all album covers and animated covers with one-by-one/ZIP selection.
 
 ### Changed
 - Telegram cache now supports song audio + MV + ZIP bundle `file_id`.

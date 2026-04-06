@@ -109,7 +109,7 @@ docker run --rm -it \
    - `/sr <关键词>` 搜索艺人
    - `/s <type> <关键词>` 统一搜索（`song|album|artist`）
    - `/u <apple-music-url>` 解析并下载链接
-   - `/ap <artist-url|artist-id>` 仅下载歌手主页照片
+   - `/ap <artist-url|artist-id>` 导出艺人主页图 + 全部专辑封面 + 动态封面（逐个/ZIP）
    - `/cv <apple-music-url>` 或 `/cv <song|album|playlist|station|mv|artist> <id>` 仅下载封面
    - `/ac <apple-music-url>` 或 `/ac <song|album|playlist|station> <id>` 仅下载动态封面
    - `/ly <song-url|song-id|album-url|album <id>>` 导出歌词文件（格式由设置决定）

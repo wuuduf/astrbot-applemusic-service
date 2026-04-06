@@ -2550,6 +2550,7 @@ const (
 	mediaTypeMusicVideo  = "music-video"
 	mediaTypeArtist      = "artist"
 	mediaTypeAlbumLyrics = "album-lyrics"
+	mediaTypeArtistAsset = "artist-asset"
 )
 
 type ChatDownloadSettings struct {
@@ -3942,7 +3943,7 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 			_ = b.sendMessageWithReply(chatID, "artistphoto only supports artist URL/ID.", nil, replyToID)
 			return
 		}
-		b.handleCoverOnly(chatID, replyToID, target, true)
+		b.promptMediaTransfer(chatID, mediaTypeArtistAsset, target.ID, target.Storefront, "", replyToID)
 	case "cover":
 		target, err := resolveCommandTarget(args, "")
 		if err != nil {
@@ -4540,6 +4541,204 @@ func renderCoverToTemp(coverURL string) (string, string, error) {
 	return coverPath, tmpDir, nil
 }
 
+func copyTempFile(srcPath, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
+func (b *TelegramBot) saveAnimatedCover(motionURL string, savePath string) error {
+	if strings.TrimSpace(motionURL) == "" {
+		return fmt.Errorf("motion url is empty")
+	}
+	videoURL, err := extractVideo(motionURL)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", savePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		outText := strings.TrimSpace(string(output))
+		if outText == "" {
+			outText = err.Error()
+		}
+		return fmt.Errorf(outText)
+	}
+	return nil
+}
+
+func (b *TelegramBot) exportArtistAssets(chatID int64, replyToID int, artistID string, storefront string, transferMode string) {
+	if strings.TrimSpace(artistID) == "" {
+		_ = b.sendMessageWithReply(chatID, "Artist ID is empty.", nil, replyToID)
+		return
+	}
+	storefront = resolveStorefront(&AppleURLTarget{Storefront: storefront})
+	status, err := newDownloadStatus(b, chatID, replyToID)
+	if err != nil {
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
+		return
+	}
+	defer status.Stop()
+
+	tmpDir, err := os.MkdirTemp("", "amdl-artist-assets-*")
+	if err != nil {
+		status.UpdateSync(fmt.Sprintf("Failed to create temp directory: %v", err), 0, 0)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	usedNames := make(map[string]struct{})
+	assetPaths := []string{}
+	coverCount := 0
+	motionCount := 0
+	failedAlbums := 0
+	ffmpegOK := true
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		ffmpegOK = false
+	}
+
+	status.Update("Loading artist profile", 0, 0)
+	artistInfo, artistErr := b.fetchArtwork(&AppleURLTarget{
+		MediaType:  mediaTypeArtist,
+		Storefront: storefront,
+		ID:         artistID,
+	})
+	artistName := sanitizeFileBaseName(firstNonEmpty(artistInfo.DisplayName, "artist-"+artistID))
+	if artistErr == nil && strings.TrimSpace(artistInfo.CoverURL) != "" {
+		profilePath, profileTmp, err := renderCoverToTemp(artistInfo.CoverURL)
+		if err == nil {
+			profileName := uniqueName(usedNames, artistName+"-artist-photo"+strings.ToLower(filepath.Ext(profilePath)))
+			profileDst := filepath.Join(tmpDir, profileName)
+			if err := copyTempFile(profilePath, profileDst); err == nil {
+				assetPaths = append(assetPaths, profileDst)
+				coverCount++
+			}
+		}
+		if strings.TrimSpace(profileTmp) != "" {
+			_ = os.RemoveAll(profileTmp)
+		}
+	}
+
+	status.Update("Loading artist albums", 0, 0)
+	albums, _, err := apputils.FetchArtistAlbums(storefront, artistID, b.appleToken, 0, 0, b.searchLanguage())
+	if err != nil {
+		status.UpdateSync(fmt.Sprintf("Failed to load artist albums: %v", err), 0, 0)
+		return
+	}
+	if strings.HasPrefix(artistName, "artist-") && len(albums) > 0 {
+		if resolvedName := sanitizeFileBaseName(albums[0].Artist); resolvedName != "" {
+			artistName = resolvedName
+		}
+	}
+	totalAlbums := len(albums)
+	for i, album := range albums {
+		status.Update("Collecting artist assets", int64(i), int64(totalAlbums))
+		if strings.TrimSpace(album.ID) == "" {
+			continue
+		}
+		info, err := b.fetchArtwork(&AppleURLTarget{
+			MediaType:  mediaTypeAlbum,
+			Storefront: storefront,
+			ID:         album.ID,
+		})
+		if err != nil {
+			failedAlbums++
+			continue
+		}
+		albumBase := sanitizeFileBaseName(firstNonEmpty(info.DisplayName, album.Name, "album-"+album.ID))
+
+		if strings.TrimSpace(info.CoverURL) != "" {
+			coverPath, coverTmp, err := renderCoverToTemp(info.CoverURL)
+			if err == nil {
+				coverName := uniqueName(usedNames, fmt.Sprintf("%03d-%s-cover%s", i+1, albumBase, strings.ToLower(filepath.Ext(coverPath))))
+				coverDst := filepath.Join(tmpDir, coverName)
+				if err := copyTempFile(coverPath, coverDst); err == nil {
+					assetPaths = append(assetPaths, coverDst)
+					coverCount++
+				}
+			}
+			if strings.TrimSpace(coverTmp) != "" {
+				_ = os.RemoveAll(coverTmp)
+			}
+		}
+
+		if ffmpegOK && strings.TrimSpace(info.MotionURL) != "" {
+			motionName := uniqueName(usedNames, fmt.Sprintf("%03d-%s-animated-cover.mp4", i+1, albumBase))
+			motionDst := filepath.Join(tmpDir, motionName)
+			if err := b.saveAnimatedCover(info.MotionURL, motionDst); err == nil {
+				assetPaths = append(assetPaths, motionDst)
+				motionCount++
+			}
+		}
+	}
+
+	if !ffmpegOK {
+		_ = b.sendMessageWithReply(chatID, "ffmpeg 不可用，已跳过动态封面导出。", nil, replyToID)
+	}
+	if len(assetPaths) == 0 {
+		status.UpdateSync("No artist assets exported.", 0, 0)
+		return
+	}
+
+	if transferMode == transferModeZip {
+		status.Update("Building ZIP", int64(len(assetPaths)), int64(len(assetPaths)))
+		zipPath, displayName, err := createZipFromPaths(assetPaths)
+		if err != nil {
+			status.UpdateSync(fmt.Sprintf("Failed to build ZIP: %v", err), 0, 0)
+			return
+		}
+		defer os.Remove(zipPath)
+		if artistName != "" {
+			displayName = artistName + ".artist-assets.zip"
+		}
+		if err := b.sendDocumentFile(chatID, zipPath, displayName, replyToID, status, ""); err == nil {
+			status.Stop()
+			_ = b.deleteMessage(chatID, status.messageID)
+		} else if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
+			status.UpdateSync("ZIP exceeds Telegram size limit, fallback to one-by-one.", 0, 0)
+			transferMode = transferModeOneByOne
+		} else {
+			status.UpdateSync(fmt.Sprintf("Failed to send ZIP: %v", err), 0, 0)
+			return
+		}
+	}
+
+	if transferMode == transferModeOneByOne {
+		sentCount := 0
+		for idx, path := range assetPaths {
+			status.Update("Sending artist assets", int64(idx), int64(len(assetPaths)))
+			ext := strings.ToLower(filepath.Ext(path))
+			var err error
+			if ext == ".mp4" {
+				err = b.sendVideoFile(chatID, path, replyToID, "", status, "")
+				if err != nil {
+					err = b.sendDocumentFile(chatID, path, filepath.Base(path), replyToID, status, "")
+				}
+			} else {
+				err = b.sendDocumentFile(chatID, path, filepath.Base(path), replyToID, status, "")
+			}
+			if err == nil {
+				sentCount++
+			}
+		}
+		status.Stop()
+		_ = b.deleteMessage(chatID, status.messageID)
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Artist assets done: sent=%d, covers=%d, animated=%d, failed_albums=%d.", sentCount, coverCount, motionCount, failedAlbums), nil, replyToID)
+		return
+	}
+}
+
 func (b *TelegramBot) handleCoverOnly(chatID int64, replyToID int, target *AppleURLTarget, artistOnly bool) {
 	info, err := b.fetchArtwork(target)
 	if err != nil {
@@ -5043,6 +5242,20 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 	b.clearPendingTransfer(chatID)
 	settings := b.getChatSettings(chatID)
 
+	if mediaType == mediaTypeArtistAsset {
+		switch mode {
+		case transferModeOneByOne:
+			_ = b.editMessageText(chatID, messageID, "Artist assets export mode: one by one.", nil)
+			go b.exportArtistAssets(chatID, replyToID, mediaID, pending.Storefront, transferModeOneByOne)
+		case transferModeZip:
+			_ = b.editMessageText(chatID, messageID, "Artist assets export mode: ZIP.", nil)
+			go b.exportArtistAssets(chatID, replyToID, mediaID, pending.Storefront, transferModeZip)
+		default:
+			_ = b.editMessageText(chatID, messageID, "Unknown artist assets export mode.", nil)
+		}
+		return
+	}
+
 	if mediaType == mediaTypeAlbumLyrics {
 		switch mode {
 		case transferModeOneByOne:
@@ -5298,6 +5511,8 @@ func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaI
 	message := "Choose transfer method:"
 	if mediaType == mediaTypeAlbumLyrics {
 		message = "Choose lyrics export method:"
+	} else if mediaType == mediaTypeArtistAsset {
+		message = "Choose artist assets export method:"
 	}
 	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildTransferKeyboard(), replyToID)
 	if err != nil {
@@ -7675,7 +7890,7 @@ func botHelpText() string {
 /sr <关键词> 搜索艺人
 /s <类型> <关键词> 统一搜索
 /u <Apple Music 链接> 解析并下载链接
-/ap <艺人-url|艺人-id> 仅下载艺人头像
+/ap <艺人-url|艺人-id> 导出艺人主页图+专辑封面+动态封面（逐个/ZIP）
 /cv <url|type id> 仅下载封面
 /ac <url|type id> 仅下载动态封面
 /ly <song|album> 导出歌词文件（格式由设置决定）

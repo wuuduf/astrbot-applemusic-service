@@ -150,7 +150,7 @@ Notes:
    - `/sr <keywords>` search artists
    - `/s <type> <keywords>` unified search (`song|album|artist`)
    - `/u <apple-music-url>` parse and download from URL
-   - `/ap <artist-url|artist-id>` download artist profile photo only
+   - `/ap <artist-url|artist-id>` export artist profile photo + all album covers + animated covers (one-by-one or ZIP)
    - `/cv <apple-music-url>` or `/cv <song|album|playlist|station|mv|artist> <id>` download cover only
    - `/ac <apple-music-url>` or `/ac <song|album|playlist|station> <id>` download animated cover only
    - `/ly <song-url|song-id|album-url|album <id>>` export lyrics files (format from settings)
