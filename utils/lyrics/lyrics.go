@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/beevik/etree"
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 )
 
 type SongLyrics struct {
@@ -60,13 +61,18 @@ func getSongLyrics(songId string, storefront string, token string, userToken str
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	cookie := http.Cookie{Name: "media-user-token", Value: userToken}
 	req.AddCookie(&cookie)
-	do, err := http.DefaultClient.Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer do.Body.Close()
+	if do.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get lyrics: %s", do.Status)
+	}
 	obj := new(SongLyrics)
-	_ = json.NewDecoder(do.Body).Decode(&obj)
+	if err := json.NewDecoder(do.Body).Decode(&obj); err != nil {
+		return "", err
+	}
 	if obj.Data != nil {
 		if len(obj.Data[0].Attributes.Ttml) > 0 {
 			return obj.Data[0].Attributes.Ttml, nil

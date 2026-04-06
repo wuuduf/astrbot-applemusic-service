@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 )
 
 func GetMusicVideoResp(storefront string, id string, language string, token string) (*MusicVideoResp, error) {
@@ -35,7 +37,7 @@ func GetMusicVideoResp(storefront string, id string, language string, token stri
 	//query.Set("extend", "editorialVideo")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 )
 
 func GetPlaylistResp(storefront string, id string, language string, token string) (*PlaylistResp, error) {
@@ -34,7 +36,7 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 	query.Set("extend", "editorialVideo,extendedAssetUrls")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -62,16 +64,17 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 			query.Set("include", "artists")
 			query.Set("extend", "editorialVideo,extendedAssetUrls")
 			req.URL.RawQuery = query.Encode()
-			do, err := http.DefaultClient.Do(req)
+			do, err := nethttp.Do(req)
 			if err != nil {
 				return nil, err
 			}
-			defer do.Body.Close()
 			if do.StatusCode != http.StatusOK {
+				do.Body.Close()
 				return nil, errors.New(do.Status)
 			}
 			obj2 := new(TrackResp)
 			err = json.NewDecoder(do.Body).Decode(&obj2)
+			do.Body.Close()
 			if err != nil {
 				return nil, err
 			}

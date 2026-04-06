@@ -23,6 +23,7 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"google.golang.org/protobuf/proto"
 
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 	cdm "github.com/wuuduf/astrbot-applemusic-service/utils/runv3/cdm"
 	key "github.com/wuuduf/astrbot-applemusic-service/utils/runv3/key"
 )
@@ -141,7 +142,7 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 	req.Header.Set("x-apple-music-user-token", mutoken)
 	// 创建 HTTP 客户端
 	//client := &http.Client{}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := nethttp.Do(req)
 	// 发送请求
 	//resp, err := client.Do(req)
 	if err != nil {
@@ -149,6 +150,9 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 		return "", "", "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("webPlayback request failed: %s", resp.Status)
+	}
 	//fmt.Println("Response Status:", resp.Status)
 	obj := new(Songlist)
 	err = json.NewDecoder(resp.Body).Decode(&obj)
@@ -188,7 +192,7 @@ type Songlist struct {
 }
 
 func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
-	resp, err := http.Get(b)
+	resp, err := nethttp.Get(b)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -242,19 +246,27 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
 func extsong(b string, progress ProgressFunc) bytes.Buffer {
-	resp, err := http.Get(b)
+	resp, err := nethttp.Get(b)
+	var buffer bytes.Buffer
 	if err != nil {
 		fmt.Printf("下载文件失败: %v\n", err)
+		return buffer
 	}
 	defer resp.Body.Close()
-	var buffer bytes.Buffer
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("下载文件失败: %s\n", resp.Status)
+		return buffer
+	}
 	if progress != nil {
 		pw := &progressWriter{
 			cb:    progress,
 			phase: "Downloading",
 			total: resp.ContentLength,
 		}
-		io.Copy(io.MultiWriter(&buffer, pw), resp.Body)
+		if _, err := io.Copy(io.MultiWriter(&buffer, pw), resp.Body); err != nil {
+			fmt.Printf("读取下载流失败: %v\n", err)
+			return bytes.Buffer{}
+		}
 	} else {
 		bar := progressbar.NewOptions64(
 			resp.ContentLength,
@@ -274,7 +286,10 @@ func extsong(b string, progress ProgressFunc) bytes.Buffer {
 				BarEnd:        "",
 			}),
 		)
-		io.Copy(io.MultiWriter(&buffer, bar), resp.Body)
+		if _, err := io.Copy(io.MultiWriter(&buffer, bar), resp.Body); err != nil {
+			fmt.Printf("读取下载流失败: %v\n", err)
+			return bytes.Buffer{}
+		}
 	}
 	return buffer
 }

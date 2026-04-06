@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/grafov/m3u8"
@@ -19,10 +21,21 @@ import (
 	"encoding/binary"
 	"github.com/schollz/progressbar/v3"
 
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 )
 
-const prefetchKey = "skd://itunes.apple.com/P000000000/s1/e1"
+const (
+	prefetchKey              = "skd://itunes.apple.com/P000000000/s1/e1"
+	defaultIdleTimeoutSec    = 300
+	minIdleTimeoutSec        = 30
+	runv2IdleTimeoutEnvKey   = "AMDL_RUNV2_IDLE_TIMEOUT_SEC"
+	defaultHeaderTimeoutSec  = 45
+	defaultDialTimeoutSec    = 10
+	defaultHandshakeTimeout  = 10
+	defaultIdleConnTimeout   = 90
+	defaultExpectContinueSec = 1
+)
 
 var ErrTimeout = errors.New("response timed out")
 
@@ -63,11 +76,43 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func resolveIdleTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(runv2IdleTimeoutEnvKey))
+	if raw == "" {
+		return time.Duration(defaultIdleTimeoutSec) * time.Second
+	}
+	sec, err := strconv.Atoi(raw)
+	if err != nil {
+		return time.Duration(defaultIdleTimeoutSec) * time.Second
+	}
+	if sec <= 0 {
+		return 0
+	}
+	if sec < minIdleTimeoutSec {
+		sec = minIdleTimeoutSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func newRunv2StreamClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          32,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       defaultIdleConnTimeout * time.Second,
+			TLSHandshakeTimeout:   defaultHandshakeTimeout * time.Second,
+			ExpectContinueTimeout: defaultExpectContinueSec * time.Second,
+			ResponseHeaderTimeout: defaultHeaderTimeoutSec * time.Second,
+		},
+	}
+}
+
 func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc) error {
 	var err error
-	var optstimeout uint
-	optstimeout = 0
-	timeout := time.Duration(optstimeout * uint(time.Millisecond))
+	idleTimeout := resolveIdleTimeout()
 	header := make(http.Header)
 
 	// request media playlist
@@ -76,10 +121,13 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 		return err
 	}
 	req.Header = header
-	// requesting an HLS playlist should be relatively fast, so we set the timeout directly on the client
-	do, err := (&http.Client{Timeout: timeout}).Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return err
+	}
+	defer do.Body.Close()
+	if do.StatusCode != http.StatusOK {
+		return fmt.Errorf("request media playlist failed: %s", do.Status)
 	}
 
 	// parse m3u8
@@ -115,18 +163,21 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	req.Header = header
 
 	var body io.Reader
-	client := &http.Client{Timeout: timeout}
-	if optstimeout > 0 {
-		// create the timer before calling Do so that the timeout covers TCP handshake,
-		// TLS handshake, sending the request and receiving HTTP headers
-		timer := time.AfterFunc(timeout, func() { cancel(ErrTimeout) })
+	client := newRunv2StreamClient()
+	if idleTimeout > 0 {
+		// Idle watchdog: cancel the request only when no bytes are received for N seconds.
+		timer := time.AfterFunc(idleTimeout, func() { cancel(ErrTimeout) })
+		defer timer.Stop()
 		do, err = client.Do(req)
 		if err != nil {
 			return err
 		}
 		defer do.Body.Close()
+		if do.StatusCode != http.StatusOK {
+			return fmt.Errorf("request media stream failed: %s", do.Status)
+		}
 		body = &TimedResponseBody{
-			timeout:   timeout,
+			timeout:   idleTimeout,
 			timer:     timer,
 			threshold: 256,
 			body:      do.Body,
@@ -137,6 +188,9 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 			return err
 		}
 		defer do.Body.Close()
+		if do.StatusCode != http.StatusOK {
+			return fmt.Errorf("request media stream failed: %s", do.Status)
+		}
 		body = do.Body
 	}
 

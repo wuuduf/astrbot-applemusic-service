@@ -1,9 +1,12 @@
 package ampapi
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
+
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 )
 
 func GetToken() (string, error) {
@@ -12,7 +15,7 @@ func GetToken() (string, error) {
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := nethttp.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -25,13 +28,16 @@ func GetToken() (string, error) {
 
 	regex := regexp.MustCompile(`/assets/index~[^/]+\.js`)
 	indexJsUri := regex.FindString(string(body))
+	if indexJsUri == "" {
+		return "", errors.New("failed to locate apple music index js")
+	}
 
 	req, err = http.NewRequest("GET", "https://music.apple.com"+indexJsUri, nil)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = nethttp.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -44,6 +50,9 @@ func GetToken() (string, error) {
 
 	regex = regexp.MustCompile(`eyJh([^"]*)`)
 	token := regex.FindString(string(body))
+	if token == "" {
+		return "", errors.New("failed to extract bearer token from apple music page")
+	}
 
 	return token, nil
 }

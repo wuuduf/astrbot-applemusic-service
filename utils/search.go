@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -438,7 +439,7 @@ func fetchArtistRelationship(storefront, artistID, token, relationship, itemType
 			query.Set("l", language)
 		}
 		req.URL.RawQuery = query.Encode()
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := nethttp.Do(req)
 		if err != nil {
 			return nil, false, err
 		}

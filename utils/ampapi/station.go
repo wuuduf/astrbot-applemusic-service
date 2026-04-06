@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 )
 
 func GetStationResp(storefront string, id string, language string, token string) (*StationResp, error) {
@@ -29,7 +31,7 @@ func GetStationResp(storefront string, id string, language string, token string)
 	query.Set("extend", "editorialVideo")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +71,7 @@ func GetStationAssetsUrlAndServerUrl(id string, mutoken string, token string) (s
 	query.Set("kind", "radioStation")
 	query.Set("keyFormat", "web")
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return "", "", err
 	}
@@ -110,7 +112,7 @@ func GetStationNextTracks(id, mutoken, language, token string) (*TrackResp, erro
 	query.Set("extend", "editorialVideo,extendedAssetUrls")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := nethttp.Do(req)
 	if err != nil {
 		return nil, err
 	}

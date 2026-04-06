@@ -179,6 +179,8 @@ Notes:
 - If the download folder exceeds the limit, older files are removed (default 3GB; set `telegram-download-max-gb`, Telegram cache remains).
 - If `AMDL_TMPDIR`/`TMPDIR` is set (and not `/tmp` or `/var/tmp`), that temp directory is included in the same cleanup threshold.
 - ZIP temp files prefer download directories first (fallback to system temp). You can force temp directory via `AMDL_TMPDIR=/path/to/dir`.
+- Apple API/downloader outbound HTTP timeout defaults to `45s`; tune it with `AMDL_HTTP_TIMEOUT_SEC` (minimum `5`).
+- `runv2` stream idle timeout defaults to `300s`; tune with `AMDL_RUNV2_IDLE_TIMEOUT_SEC` (`0` disables idle timeout).
 - Large files are re-encoded to fit `telegram-max-file-mb` in FLAC mode (quality may be reduced).
 - `/animatedcover` returns a clear reminder when the target has no animated artwork.
 - `/lyrics` supports song and album targets. Album export supports one-by-one or ZIP (ZIP auto-falls back when oversized).

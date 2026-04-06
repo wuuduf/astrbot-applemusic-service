@@ -32,7 +32,11 @@ All notable changes to this project will be documented in this file.
 - `chat_id` is no longer auto-shown in `/start`/`/help` or unauthorized replies.
 - `/id` (without args) now shows current `chat_id`; `/id <...>` behavior remains for media downloads.
 - Telegram auto extras (`lyrics` / `cover` / `animated`) are now disabled by default for new chat settings.
+- Apple API/downloader outbound requests now use a shared HTTP client with configurable timeout (`AMDL_HTTP_TIMEOUT_SEC`, default `45s`).
+- `runv2` now uses configurable stream idle timeout (`AMDL_RUNV2_IDLE_TIMEOUT_SEC`, default `300s`) instead of unlimited waits.
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.
 - MV segmented downloader now retries transient segment failures and reports incomplete segment errors clearly instead of producing partial outputs.
+- Avoided connection/body handle buildup in paginated Apple API loops by closing response bodies per iteration.
+- Improved request failure handling for token/lyrics/webPlayback/download stream paths (clear status checks and decode errors).
