@@ -7,6 +7,9 @@
 !SECURITY.md
 !CODE_OF_CONDUCT.md
 !CHANGELOG.md
+!Dockerfile
+!.env.telegram-bot-api.example
+!docker-compose.telegram-bot-api.yml
 !agent.js
 !agent-arm64.js
 !go.mod
@@ -21,4 +24,4 @@
 !.github/workflows/
 !.github/workflows/*
 !utils/
-!utils/*
+!utils/**
