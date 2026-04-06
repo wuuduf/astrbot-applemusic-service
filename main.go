@@ -7459,10 +7459,6 @@ func botHelpText() string {
 /ly <song|album>            导出歌词文件（格式由设置决定）
 /st [值]                    查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
 
-兼容旧命令（仍可用）：
-/help /id /search_song /search_album /search_artist /search /url
-/artistphoto /cover /animatedcover /lyrics /settings
-
 也支持直接发送 Apple Music 链接：
 - song / album / playlist / artist / station / music-video
 `)
