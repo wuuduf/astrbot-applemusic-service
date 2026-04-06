@@ -102,6 +102,7 @@ docker run --rm -it \
    - `telegram-no-proxy`：设为 `true` 可强制直连（忽略环境变量代理）
 6. 启动：`go run . --bot`
 7. 命令示例：
+   - `/chatid`（显示当前会话 `chat_id`，用于配置 `telegram-allowed-chat-ids` 白名单）
    - `/search_song <关键词>`
    - `/search_album <关键词>`
    - `/search_artist <关键词>`

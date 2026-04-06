@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Telegram bot support for Apple Music URL types: song, album, playlist, artist, station, music-video.
 - New bot commands: `/playlistid`, `/stationid`, `/mvid`, `/artistid`, `/url`, expanded `/id`.
+- New Telegram command: `/chatid` (also `/sessionid`) to show current `chat_id` for whitelist setup.
 - Artist secondary flow for `Albums` vs `Music Videos`.
 - Unified transfer mode for album/playlist/station: one-by-one and ZIP.
 - MV download/send flow with cache-aware re-send.
@@ -20,6 +21,7 @@ All notable changes to this project will be documented in this file.
 - Bot polling errors now redact Telegram token in console logs.
 - Telegram song download now supports transfer selection (`one` / `zip`) like collections.
 - AstrBot API download now allows `transfer_mode=zip` for `song` targets.
+- Unauthorized reply now includes `chat_id` hint to help configure `telegram-allowed-chat-ids`.
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.

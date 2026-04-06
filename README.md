@@ -143,6 +143,7 @@ Notes:
    - `telegram-no-proxy=true` to force direct connection (ignore env proxy)
 6. Start the bot: `go run . --bot`
 7. Commands:
+   - `/chatid` (show current `chat_id` for `telegram-allowed-chat-ids` whitelist)
    - `/search_song <keywords>`
    - `/search_album <keywords>`
    - `/search_artist <keywords>`

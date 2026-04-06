@@ -3653,7 +3653,7 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 		return
 	}
 	if !b.isAllowedChat(msg.Chat.ID) {
-		_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.", nil)
+		_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.\n"+formatChatIDText(msg.Chat.ID), nil)
 		return
 	}
 	text := strings.TrimSpace(msg.Text)
@@ -3792,7 +3792,9 @@ func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, replyToID int) {
 	switch cmd {
 	case "start", "help":
-		_ = b.sendMessage(chatID, botHelpText(), nil)
+		_ = b.sendMessage(chatID, botHelpText()+"\n\n"+formatChatIDText(chatID), nil)
+	case "chatid", "sessionid":
+		_ = b.sendMessage(chatID, formatChatIDText(chatID), nil)
 	case "search_song":
 		b.handleSearch(chatID, "song", strings.Join(args, " "), replyToID)
 	case "search_album":
@@ -7399,6 +7401,7 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 func botHelpText() string {
 	return strings.TrimSpace(`
 Commands:
+/chatid                     show current session ID (chat_id) for whitelist
 /search_song <keywords>     search songs
 /search_album <keywords>    search albums
 /search_artist <keywords>   search artists
@@ -7413,4 +7416,15 @@ Commands:
 You can also send an Apple Music URL directly:
 - song / album / playlist / artist / station / music-video
 `)
+}
+
+func formatChatIDText(chatID int64) string {
+	return fmt.Sprintf(
+		"Session ID (chat_id): %d\n"+
+			"Use this value in config.yaml whitelist:\n"+
+			"telegram-allowed-chat-ids:\n"+
+			"  - %d",
+		chatID,
+		chatID,
+	)
 }
