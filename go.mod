@@ -1,4 +1,4 @@
-module main
+module github.com/wuuduf/astrbot-applemusic-service
 
 go 1.23.1
 

@@ -6,10 +6,10 @@ English / [简体中文](./README-CN.md)
 
 1. Supports inline covers and LRC lyrics（Demand`media-user-token`，See the instructions at the end for how to get it）
 2. Added support for getting word-by-word and out-of-sync lyrics
-3. Support downloading singers `go run main.go https://music.apple.com/us/artist/taylor-swift/159260351` `--all-album` Automatically select all albums of the artist
+3. Support downloading singers `go run . https://music.apple.com/us/artist/taylor-swift/159260351` `--all-album` Automatically select all albums of the artist
 4. The download decryption part is replaced with Sendy McSenderson to decrypt while downloading, and solve the lack of memory when decrypting large files
 5. MV Download, installation required[mp4decrypt](https://www.bento4.com/downloads/)
-6. Add interactive search with arrow-key navigation `go run main.go --search [song/album/artist] "search_term"`
+6. Add interactive search with arrow-key navigation `go run . --search [song/album/artist] "search_term"`
 
 ### Special thanks to `chocomint` for creating `agent-arm64.js`
 
@@ -69,13 +69,13 @@ docker run --network host -v ./downloads:/downloads -v ./config.yaml:/app/config
 
 ## How to use
 1. Make sure the decryption program [wrapper](https://github.com/WorldObservationLog/wrapper) is running
-2. Start downloading some albums: `go run main.go https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511`.
-3. Start downloading single song: `go run main.go --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512` or `go run main.go https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520`.
-4. Start downloading select: `go run main.go --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511` input numbers separated by spaces.
-5. Start downloading some playlists: `go run main.go https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b` or `go run main.go https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N`.
-6. For dolby atmos: `go run main.go --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
-7. For aac: `go run main.go --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
-8. For see quality: `go run main.go --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
+2. Start downloading some albums: `go run . https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511`.
+3. Start downloading single song: `go run . --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512` or `go run . https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520`.
+4. Start downloading select: `go run . --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511` input numbers separated by spaces.
+5. Start downloading some playlists: `go run . https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b` or `go run . https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N`.
+6. For dolby atmos: `go run . --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
+7. For aac: `go run . --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
+8. For see quality: `go run . --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
 
 [Chinese tutorial - see Method 3 for details](https://telegra.ph/Apple-Music-Alac高解析度无损音乐下载教程-04-02-2)
 
@@ -110,7 +110,7 @@ Notes:
 5. Optional: control Telegram proxy behavior:
    - `telegram-proxy-url` to force a specific proxy (for example `http://127.0.0.1:7890`)
    - `telegram-no-proxy=true` to force direct connection (ignore env proxy)
-6. Start the bot: `go run main.go --bot`
+6. Start the bot: `go run . --bot`
 7. Commands:
    - `/search_song <keywords>`
    - `/search_album <keywords>`

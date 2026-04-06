@@ -16,10 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	apputils "main/utils"
-	"main/utils/ampapi"
-	"main/utils/lyrics"
-	"main/utils/structs"
+	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/lyrics"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 )
 
 const (

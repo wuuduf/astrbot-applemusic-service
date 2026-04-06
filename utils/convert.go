@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"main/utils/structs"
-	"main/utils/task"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/task"
 )
 
 // ProgressFunc reports conversion progress.

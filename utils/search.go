@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"main/utils/ampapi"
-	"main/utils/structs"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 
 	"github.com/AlecAivazis/survey/v2"
 )

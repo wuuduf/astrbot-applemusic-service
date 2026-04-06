@@ -6,7 +6,7 @@
 
 1. 支持内嵌封面和LRC歌词（需要`media-user-token`，获取方式看最后的说明）
 2. 支持获取逐词与未同步歌词
-3. 支持下载歌手 `go run main.go https://music.apple.com/us/artist/taylor-swift/159260351` `--all-album` 自动选择歌手的所有专辑
+3. 支持下载歌手 `go run . https://music.apple.com/us/artist/taylor-swift/159260351` `--all-album` 自动选择歌手的所有专辑
 4. 下载解密部分更换为Sendy McSenderson的代码，实现边下载边解密,解决大文件解密时内存不足
 5. MV下载，需要安装[mp4decrypt](https://www.bento4.com/downloads/)
 
@@ -27,13 +27,13 @@
 
 ## 使用方法
 1. 确保解密程序 [wrapper](https://github.com/WorldObservationLog/wrapper) 正在运行
-2. 开始下载部分专辑：`go run main.go https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511`。
-3. 开始下载单曲：`go run main.go --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512` 或 `go run main.go https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520`。
-4. 开始下载所选曲目：`go run main.go --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511` 输入以空格分隔的数字。
-5. 开始下载部分播放列表：`go run main.go https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b` 或 `go run main.go https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N`。
-6. 对于杜比全景声 (Dolby Atmos)：`go run main.go --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`。
-7. 对于 AAC (AAC)：`go run main.go --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`。
-8. 要查看音质：`go run main.go --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`。
+2. 开始下载部分专辑：`go run . https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511`。
+3. 开始下载单曲：`go run . --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512` 或 `go run . https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520`。
+4. 开始下载所选曲目：`go run . --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511` 输入以空格分隔的数字。
+5. 开始下载部分播放列表：`go run . https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b` 或 `go run . https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N`。
+6. 对于杜比全景声 (Dolby Atmos)：`go run . --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`。
+7. 对于 AAC (AAC)：`go run . --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`。
+8. 要查看音质：`go run . --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`。
 
 [中文教程-详见方法三](https://telegra.ph/Apple-Music-Alac高解析度无损音乐下载教程-04-02-2)
 
@@ -68,7 +68,7 @@ docker run --rm -it \
 5. 可选：代理控制（上传慢/节点异常时很有用）：
    - `telegram-proxy-url`：显式指定 Telegram 代理（例如 `http://127.0.0.1:7890`）
    - `telegram-no-proxy`：设为 `true` 可强制直连（忽略环境变量代理）
-6. 启动：`go run main.go --bot`
+6. 启动：`go run . --bot`
 7. 命令示例：
    - `/search_song <关键词>`
    - `/search_album <关键词>`
