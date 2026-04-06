@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - Unauthorized reply now includes `chat_id` hint to help configure `telegram-allowed-chat-ids`.
 - Telegram auto-cleanup now also considers `AMDL_TMPDIR`/`TMPDIR` when set to dedicated paths (shared `/tmp` and `/var/tmp` are skipped).
 - Telegram help text is now Chinese.
+- Telegram `/help` now prioritizes short commands (`/h`, `/i`, `/sg`...) while keeping legacy commands compatible.
 - `chat_id` is no longer auto-shown in `/start`/`/help` or unauthorized replies.
 - `/id` (without args) now shows current `chat_id`; `/id <...>` behavior remains for media downloads.
 

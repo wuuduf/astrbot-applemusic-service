@@ -3799,6 +3799,7 @@ func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 }
 
 func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, replyToID int) {
+	cmd = normalizeTelegramBotCommand(cmd)
 	switch cmd {
 	case "start", "help":
 		_ = b.sendMessage(chatID, botHelpText(), nil)
@@ -4017,6 +4018,37 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 		_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
 	default:
 		_ = b.sendMessage(chatID, "Unknown command. Send /help for usage.", nil)
+	}
+}
+
+func normalizeTelegramBotCommand(cmd string) string {
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "h":
+		return "help"
+	case "i":
+		return "id"
+	case "sg":
+		return "search_song"
+	case "sa":
+		return "search_album"
+	case "sr":
+		return "search_artist"
+	case "s":
+		return "search"
+	case "u":
+		return "url"
+	case "ap":
+		return "artistphoto"
+	case "cv":
+		return "cover"
+	case "ac":
+		return "animatedcover"
+	case "ly":
+		return "lyrics"
+	case "st":
+		return "settings"
+	default:
+		return cmd
 	}
 }
 
@@ -7414,17 +7446,22 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 func botHelpText() string {
 	return strings.TrimSpace(`
 命令列表：
-/id                         查看当前会话ID（chat_id）；带参数时按资源ID下载
-/search_song <关键词>       搜索歌曲
-/search_album <关键词>      搜索专辑
-/search_artist <关键词>     搜索艺人
-/search <类型> <关键词>     统一搜索（song|album|artist）
-/url <Apple Music 链接>     解析并下载链接
-/artistphoto <艺人>         仅下载艺人头像
-/cover <url|type id>        仅下载封面（song/album/playlist/station/mv/artist）
-/animatedcover <url|type id> 仅下载动态封面（song/album/playlist/station）
-/lyrics <song|album>        导出歌词文件（格式由设置决定）
-/settings [值]              查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
+/h                          帮助
+/i                          查看当前会话ID（chat_id）；带参数时按资源ID下载
+/sg <关键词>                搜索歌曲
+/sa <关键词>                搜索专辑
+/sr <关键词>                搜索艺人
+/s <类型> <关键词>          统一搜索（song|album|artist）
+/u <Apple Music 链接>       解析并下载链接
+/ap <艺人>                  仅下载艺人头像
+/cv <url|type id>           仅下载封面（song/album/playlist/station/mv/artist）
+/ac <url|type id>           仅下载动态封面（song/album/playlist/station）
+/ly <song|album>            导出歌词文件（格式由设置决定）
+/st [值]                    查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
+
+兼容旧命令（仍可用）：
+/help /id /search_song /search_album /search_artist /search /url
+/artistphoto /cover /animatedcover /lyrics /settings
 
 也支持直接发送 Apple Music 链接：
 - song / album / playlist / artist / station / music-video

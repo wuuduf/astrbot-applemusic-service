@@ -101,18 +101,21 @@ docker run --rm -it \
    - `telegram-proxy-url`：显式指定 Telegram 代理（例如 `http://127.0.0.1:7890`）
    - `telegram-no-proxy`：设为 `true` 可强制直连（忽略环境变量代理）
 6. 启动：`go run . --bot`
-7. 命令示例：
-   - `/id`（不带参数时显示当前会话 `chat_id`，用于配置 `telegram-allowed-chat-ids` 白名单）
-   - `/search_song <关键词>`
-   - `/search_album <关键词>`
-   - `/search_artist <关键词>`
-   - `/search <type> <关键词>`（`type`: `song|album|artist`）
-   - `/url <apple-music-url>`
-   - `/artistphoto <artist-url|artist-id>`（仅下载歌手主页照片）
-   - `/cover <apple-music-url>` 或 `/cover <song|album|playlist|station|mv|artist> <id>`（仅下载封面）
-   - `/animatedcover <apple-music-url>` 或 `/animatedcover <song|album|playlist|station> <id>`（仅下载动态封面）
-   - `/lyrics <song-url|song-id|album-url|album <id>>`（导出歌词文件；格式由设置决定）
-   - `/settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated]`
+7. 命令示例（短命令优先）：
+   - `/h` 帮助
+   - `/i` 不带参数显示当前会话 `chat_id`；带参数时按资源 ID 下载
+   - `/sg <关键词>` 搜索歌曲
+   - `/sa <关键词>` 搜索专辑
+   - `/sr <关键词>` 搜索艺人
+   - `/s <type> <关键词>` 统一搜索（`song|album|artist`）
+   - `/u <apple-music-url>` 解析并下载链接
+   - `/ap <artist-url|artist-id>` 仅下载歌手主页照片
+   - `/cv <apple-music-url>` 或 `/cv <song|album|playlist|station|mv|artist> <id>` 仅下载封面
+   - `/ac <apple-music-url>` 或 `/ac <song|album|playlist|station> <id>` 仅下载动态封面
+   - `/ly <song-url|song-id|album-url|album <id>>` 导出歌词文件（格式由设置决定）
+   - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated]`
+   - 旧命令仍可兼容使用：
+   `/help /id /search_song /search_album /search_artist /search /url /artistphoto /cover /animatedcover /lyrics /settings`
 
 8. 也支持直接发送 Apple Music 链接，机器人会自动识别：
    - `song`

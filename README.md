@@ -142,18 +142,21 @@ Notes:
    - `telegram-proxy-url` to force a specific proxy (for example `http://127.0.0.1:7890`)
    - `telegram-no-proxy=true` to force direct connection (ignore env proxy)
 6. Start the bot: `go run . --bot`
-7. Commands:
-   - `/id` (without args: show current `chat_id` for `telegram-allowed-chat-ids`; with args: download by media id)
-   - `/search_song <keywords>`
-   - `/search_album <keywords>`
-   - `/search_artist <keywords>`
-   - `/search <type> <keywords>` (`type`: `song|album|artist`)
-   - `/url <apple-music-url>`
-   - `/artistphoto <artist-url|artist-id>` (download artist profile photo only)
-   - `/cover <apple-music-url>` or `/cover <song|album|playlist|station|mv|artist> <id>` (download cover only)
-   - `/animatedcover <apple-music-url>` or `/animatedcover <song|album|playlist|station> <id>` (download animated cover only)
-   - `/lyrics <song-url|song-id|album-url|album <id>>` (export lyrics files; format from settings)
-   - `/settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated]`
+7. Commands (short aliases first):
+   - `/h` help
+   - `/i` show current `chat_id` (without args) or download by media id (with args)
+   - `/sg <keywords>` search songs
+   - `/sa <keywords>` search albums
+   - `/sr <keywords>` search artists
+   - `/s <type> <keywords>` unified search (`song|album|artist`)
+   - `/u <apple-music-url>` parse and download from URL
+   - `/ap <artist-url|artist-id>` download artist profile photo only
+   - `/cv <apple-music-url>` or `/cv <song|album|playlist|station|mv|artist> <id>` download cover only
+   - `/ac <apple-music-url>` or `/ac <song|album|playlist|station> <id>` download animated cover only
+   - `/ly <song-url|song-id|album-url|album <id>>` export lyrics files (format from settings)
+   - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated]`
+   - Legacy commands are still supported for compatibility:
+   `/help /id /search_song /search_album /search_artist /search /url /artistphoto /cover /animatedcover /lyrics /settings`
 
 8. You can also send Apple Music URLs directly in chat. The bot auto-detects:
    - `song`
