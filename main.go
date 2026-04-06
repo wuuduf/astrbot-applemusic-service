@@ -3152,9 +3152,9 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 	autoCover := settings.AutoCover
 	autoAnimated := settings.AutoAnimated
 	if !settings.SettingsInited {
-		autoLyrics = true
-		autoCover = true
-		autoAnimated = true
+		autoLyrics = false
+		autoCover = false
+		autoAnimated = false
 	}
 	return ChatDownloadSettings{
 		Format:         normalizedFormat,

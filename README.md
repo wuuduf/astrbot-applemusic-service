@@ -168,7 +168,7 @@ Notes:
 
 Notes:
 - Default format is ALAC. `/settings` now supports ALAC/FLAC/AAC/Atmos plus AAC profile and MV audio profile.
-- `/settings` also controls lyrics format (`lrc`/`ttml`) and auto extra options (`lyrics`/`cover`/`animated`, all enabled by default).
+- `/settings` also controls lyrics format (`lrc`/`ttml`) and auto extra options (`lyrics`/`cover`/`animated`, all disabled by default).
 - Artist flow supports a second step: choose `Albums` or `Music Videos`.
 - Song/Album/Playlist/Station transfer mode is unified: `one by one` or `ZIP`.
 - ZIP results are cached via Telegram `file_id` for song/album/playlist/station.

@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - Telegram `/help` now prioritizes short commands (`/h`, `/i`, `/sg`...) while keeping legacy commands compatible.
 - `chat_id` is no longer auto-shown in `/start`/`/help` or unauthorized replies.
 - `/id` (without args) now shows current `chat_id`; `/id <...>` behavior remains for media downloads.
+- Telegram auto extras (`lyrics` / `cover` / `animated`) are now disabled by default for new chat settings.
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.
