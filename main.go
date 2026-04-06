@@ -3652,13 +3652,22 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 	if msg.Text == "" {
 		return
 	}
-	if !b.isAllowedChat(msg.Chat.ID) {
-		_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.\n"+formatChatIDText(msg.Chat.ID), nil)
-		return
-	}
 	text := strings.TrimSpace(msg.Text)
 	if cmd, args, ok := parseCommand(text); ok {
+		if !b.isAllowedChat(msg.Chat.ID) {
+			// Allow querying chat_id even when not in allowlist.
+			if cmd == "id" && len(args) == 0 {
+				_ = b.sendMessage(msg.Chat.ID, formatChatIDText(msg.Chat.ID), nil)
+			} else {
+				_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.", nil)
+			}
+			return
+		}
 		b.handleCommand(msg.Chat.ID, cmd, args, msg.MessageID)
+		return
+	}
+	if !b.isAllowedChat(msg.Chat.ID) {
+		_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.", nil)
 		return
 	}
 	urlText := extractFirstAppleMusicURL(text)
@@ -3792,9 +3801,7 @@ func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, replyToID int) {
 	switch cmd {
 	case "start", "help":
-		_ = b.sendMessage(chatID, botHelpText()+"\n\n"+formatChatIDText(chatID), nil)
-	case "chatid", "sessionid":
-		_ = b.sendMessage(chatID, formatChatIDText(chatID), nil)
+		_ = b.sendMessage(chatID, botHelpText(), nil)
 	case "search_song":
 		b.handleSearch(chatID, "song", strings.Join(args, " "), replyToID)
 	case "search_album":
@@ -3871,7 +3878,7 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 		}
 	case "id":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /id <song|album|playlist|station|mv|artist> <id>", nil)
+			_ = b.sendMessage(chatID, formatChatIDText(chatID), nil)
 			return
 		}
 		if len(args) == 1 {
@@ -7406,20 +7413,20 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 
 func botHelpText() string {
 	return strings.TrimSpace(`
-Commands:
-/chatid                     show current session ID (chat_id) for whitelist
-/search_song <keywords>     search songs
-/search_album <keywords>    search albums
-/search_artist <keywords>   search artists
-/search <type> <keywords>   unified search (song|album|artist)
-/url <apple-music-url>      parse and download from URL
-/artistphoto <artist>       download artist profile photo only
-/cover <url|type id>        download cover only (song/album/playlist/station/mv/artist)
-/animatedcover <url|type id> download animated cover only (song/album/playlist/station)
-/lyrics <song|album>        export lyrics file(s); format from settings
-/settings [value]           open settings or set format/aac/mv/lyrics/auto options
+命令列表：
+/id                         查看当前会话ID（chat_id）；带参数时按资源ID下载
+/search_song <关键词>       搜索歌曲
+/search_album <关键词>      搜索专辑
+/search_artist <关键词>     搜索艺人
+/search <类型> <关键词>     统一搜索（song|album|artist）
+/url <Apple Music 链接>     解析并下载链接
+/artistphoto <艺人>         仅下载艺人头像
+/cover <url|type id>        仅下载封面（song/album/playlist/station/mv/artist）
+/animatedcover <url|type id> 仅下载动态封面（song/album/playlist/station）
+/lyrics <song|album>        导出歌词文件（格式由设置决定）
+/settings [值]              查看或修改下载设置（音质/AAC/MV/歌词/自动附加）
 
-You can also send an Apple Music URL directly:
+也支持直接发送 Apple Music 链接：
 - song / album / playlist / artist / station / music-video
 `)
 }
