@@ -31,3 +31,4 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.
+- MV segmented downloader now retries transient segment failures and reports incomplete segment errors clearly instead of producing partial outputs.

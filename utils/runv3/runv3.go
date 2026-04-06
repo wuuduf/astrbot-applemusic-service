@@ -1,32 +1,30 @@
 package runv3
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/grafov/m3u8"
+	"github.com/itouakirai/mp4ff/mp4"
+	"github.com/schollz/progressbar/v3"
 	"google.golang.org/protobuf/proto"
 
 	cdm "github.com/wuuduf/astrbot-applemusic-service/utils/runv3/cdm"
 	key "github.com/wuuduf/astrbot-applemusic-service/utils/runv3/key"
-	"os"
-
-	"bytes"
-	"errors"
-	"io"
-
-	"github.com/itouakirai/mp4ff/mp4"
-
-	"encoding/json"
-	"net/http"
-	"os/exec"
-	"strings"
-	"sync"
-
-	"github.com/grafov/m3u8"
-	"github.com/schollz/progressbar/v3"
 )
 
 type ProgressFunc func(phase string, done, total int64)
@@ -368,39 +366,151 @@ type Segment struct {
 	Data  []byte
 }
 
-func downloadSegment(url string, index int, wg *sync.WaitGroup, segmentsChan chan<- Segment, client *http.Client, limiter chan struct{}) {
+type segmentStats struct {
+	mu      sync.Mutex
+	success int
+	failed  map[int]string
+}
+
+func newSegmentStats(total int) *segmentStats {
+	return &segmentStats{failed: make(map[int]string, total)}
+}
+
+func (s *segmentStats) markSuccess() {
+	s.mu.Lock()
+	s.success++
+	s.mu.Unlock()
+}
+
+func (s *segmentStats) markFailure(index int, reason string) {
+	s.mu.Lock()
+	s.failed[index] = reason
+	s.mu.Unlock()
+}
+
+func (s *segmentStats) snapshotFailed() (success int, failed map[int]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cloned := make(map[int]string, len(s.failed))
+	for k, v := range s.failed {
+		cloned[k] = v
+	}
+	return s.success, cloned
+}
+
+func segmentRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	// 0.6s, 1.2s, 2.4s, 4.8s ...
+	delay := 600 * time.Millisecond
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay > 6*time.Second {
+			return 6 * time.Second
+		}
+	}
+	return delay
+}
+
+func isRetryableSegmentStatus(code int) bool {
+	return code == http.StatusRequestTimeout ||
+		code == http.StatusTooManyRequests ||
+		(code >= 500 && code <= 599)
+}
+
+func buildSegmentDownloadErrorSummary(total, success int, failed map[int]string) string {
+	if len(failed) == 0 {
+		return fmt.Sprintf("分段下载不完整: 成功 %d/%d", success, total)
+	}
+	indexes := make([]int, 0, len(failed))
+	for idx := range failed {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+	preview := make([]string, 0, 5)
+	for i, idx := range indexes {
+		if i >= 5 {
+			break
+		}
+		preview = append(preview, fmt.Sprintf("%d(%s)", idx, failed[idx]))
+	}
+	return fmt.Sprintf("分段下载失败: 成功 %d/%d, 失败分段=%s", success, total, strings.Join(preview, ", "))
+}
+
+func downloadSegment(
+	url string,
+	index int,
+	wg *sync.WaitGroup,
+	segmentsChan chan<- Segment,
+	client *http.Client,
+	limiter chan struct{},
+	stats *segmentStats,
+) {
 	// 函数退出时，从 limiter 中接收一个值，释放一个并发槽位
 	defer func() {
 		<-limiter
 		wg.Done()
 	}()
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		fmt.Printf("错误(分段 %d): 创建请求失败: %v\n", index, err)
+	const maxRetries = 5
+	var lastErr string
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			cancel()
+			lastErr = fmt.Sprintf("创建请求失败: %v", err)
+			break
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			lastErr = fmt.Sprintf("下载失败: %v", err)
+			if attempt < maxRetries {
+				time.Sleep(segmentRetryDelay(attempt))
+				continue
+			}
+			break
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Sprintf("服务器返回状态码 %d", resp.StatusCode)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			cancel()
+			if attempt < maxRetries && isRetryableSegmentStatus(resp.StatusCode) {
+				time.Sleep(segmentRetryDelay(attempt))
+				continue
+			}
+			break
+		}
+
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel()
+		if err != nil {
+			lastErr = fmt.Sprintf("读取数据失败: %v", err)
+			if attempt < maxRetries {
+				time.Sleep(segmentRetryDelay(attempt))
+				continue
+			}
+			break
+		}
+
+		// 将下载好的分段（包含序号和数据）发送到 Channel
+		segmentsChan <- Segment{Index: index, Data: data}
+		stats.markSuccess()
 		return
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("错误(分段 %d): 下载失败: %v\n", index, err)
-		return
+	if lastErr == "" {
+		lastErr = "未知错误"
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("错误(分段 %d): 服务器返回状态码 %d\n", index, resp.StatusCode)
-		return
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("错误(分段 %d): 读取数据失败: %v\n", index, err)
-		return
-	}
-
-	// 将下载好的分段（包含序号和数据）发送到 Channel
-	segmentsChan <- Segment{Index: index, Data: data}
+	stats.markFailure(index, lastErr)
+	fmt.Printf("错误(分段 %d): %s\n", index, lastErr)
 }
 
 // fileWriter 从 Channel 接收分段并按顺序写入文件
@@ -470,7 +580,18 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	const maxConcurrency = 10
 	// --- 新增代码: 创建带缓冲的 Channel 作为信号量 ---
 	limiter := make(chan struct{}, maxConcurrency)
-	client := &http.Client{}
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			MaxIdleConns:        32,
+			MaxIdleConnsPerHost: 16,
+			IdleConnTimeout:     30 * time.Second,
+			// Apple CDN 在高并发下偶发 H2 stream reset，强制 H1 更稳。
+			ForceAttemptHTTP2: false,
+		},
+	}
+	defer client.CloseIdleConnections()
+	stats := newSegmentStats(len(urls))
 
 	// 初始化进度条
 	bar := progressbar.DefaultBytes(-1, "Downloading...")
@@ -490,7 +611,7 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 
 		downloadWg.Add(1)
 		// 将 limiter 传递给下载函数
-		go downloadSegment(url, i, &downloadWg, segmentsChan, client, limiter)
+		go downloadSegment(url, i, &downloadWg, segmentsChan, client, limiter, stats)
 	}
 
 	// 等待所有下载任务完成
@@ -500,6 +621,11 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 
 	// 等待写入 Goroutine 完成所有写入和缓冲处理
 	writerWg.Wait()
+
+	success, failed := stats.snapshotFailed()
+	if success != len(urls) {
+		return fmt.Errorf(buildSegmentDownloadErrorSummary(len(urls), success, failed))
+	}
 
 	// 显式关闭文件（defer会再次调用，但重复关闭是安全的）
 	if err := tempFile.Close(); err != nil {
