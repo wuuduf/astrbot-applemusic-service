@@ -25,6 +25,38 @@
 
 原脚本由 Sorrow 编写。本人已修改，包含一些修复和改进。
 
+## 项目关系与上游来源
+
+- 本仓库用于提供 Apple Music 下载能力，定位是“下载内核 + 多入口”。
+- 上游脉络：`apple-music-downloader` -> `apple-music-downloader-bot` -> 本仓库（新增 AstrBot API 模式）。
+- 本仓库保留 Telegram 机器人入口（`--bot`），并新增 AstrBot 服务入口（`--astrbot-api`）。
+
+参考项目：
+
+- [moeleak/apple-music-downloader-bot](https://github.com/moeleak/apple-music-downloader-bot)
+- [zhaarey/apple-music-downloader](https://github.com/zhaarey/apple-music-downloader)
+
+## AstrBot 插件配套说明
+
+如果你是给 AstrBot/NapCat 使用，请搭配插件仓库：
+
+- 插件仓库：[astrbot-plugin-applemusic](https://github.com/wuuduf/astrbot-plugin-applemusic)
+- 服务端 AstrBot 文档：[README-ASTRBOT.md](./README-ASTRBOT.md)
+
+核心原则：
+
+1. 插件负责命令/会话/消息发送。
+2. 服务端负责 Apple API、下载、解密、转码、缓存、队列。
+3. 两者通过 HTTP API 通信，不要把下载核心直接塞进 AstrBot 插件进程。
+
+## 能不能做成“一个插件”？
+
+从工程上可以合包发布，但不建议做成单进程单插件：
+
+1. 下载链路是长耗时重 I/O，放在服务端更容易做队列隔离与故障恢复。
+2. 下载核心依赖 Go 与外部工具链（`MP4Box`/`mp4decrypt`），不适合绑定在 Python 插件运行时中。
+3. Telegram 与 AstrBot 可复用同一套下载能力，服务化后维护成本更低。
+
 ## 使用方法
 1. 确保解密程序 [wrapper](https://github.com/WorldObservationLog/wrapper) 正在运行
 2. 开始下载部分专辑：`go run . https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511`。

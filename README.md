@@ -27,6 +27,37 @@ For acquisition`aac-lc` `MV` `lyrics` You must fill in the information with a su
 
 Original script by Sorrow. Modified by me to include some fixes and improvements.
 
+## Project Lineage and Scope
+
+- This repository is the service-side evolution of the `apple-music-downloader-bot` stack.
+- Upstream lineage (high level): `apple-music-downloader` -> `apple-music-downloader-bot` -> this repo.
+- This repo keeps Telegram bot mode (`--bot`) and adds AstrBot API mode (`--astrbot-api`) for machine-to-machine integration.
+
+Upstream references:
+
+- [moeleak/apple-music-downloader-bot](https://github.com/moeleak/apple-music-downloader-bot)
+- [zhaarey/apple-music-downloader](https://github.com/zhaarey/apple-music-downloader)
+
+## AstrBot Integration
+
+For AstrBot/NapCat usage, pair this service with the plugin project:
+
+- Plugin: [astrbot-plugin-applemusic](https://github.com/wuuduf/astrbot-plugin-applemusic)
+- Service API docs: [README-ASTRBOT.md](./README-ASTRBOT.md)
+
+Responsibility split:
+
+1. Plugin side: command parsing, sessions, message sending.
+2. Service side: Apple API calls, downloading, decrypting, transcoding, caching, queueing.
+
+## Why not a single AstrBot plugin process?
+
+It can be packaged together, but running everything inside one Python plugin process is not recommended:
+
+1. Runtime/toolchain mismatch (Python plugin vs Go downloader + external binaries).
+2. Long-running heavy I/O tasks need queue isolation and better fault boundaries.
+3. The same download core is reused by Telegram and AstrBot, so serviceization reduces duplicated maintenance.
+
 ## Running with Docker
 
 1. Make sure the decryption program [wrapper](https://github.com/WorldObservationLog/wrapper) is running
