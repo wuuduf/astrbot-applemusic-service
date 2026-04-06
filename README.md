@@ -166,8 +166,8 @@ Notes:
 - Default format is ALAC. `/settings` now supports ALAC/FLAC/AAC/Atmos plus AAC profile and MV audio profile.
 - `/settings` also controls lyrics format (`lrc`/`ttml`) and auto extra options (`lyrics`/`cover`/`animated`, all enabled by default).
 - Artist flow supports a second step: choose `Albums` or `Music Videos`.
-- Album/Playlist/Station transfer mode is unified: `one by one` or `ZIP`.
-- ZIP results are cached via Telegram `file_id` for album/playlist/station.
+- Song/Album/Playlist/Station transfer mode is unified: `one by one` or `ZIP`.
+- ZIP results are cached via Telegram `file_id` for song/album/playlist/station.
 - MV supports send-as-video, fallback-to-document, and Telegram `file_id` cache re-send.
 - If ZIP is too large for Telegram, the bot falls back to one-by-one transfer automatically.
 - If the download folder exceeds the limit, older files are removed (default 3GB; set `telegram-download-max-gb`, Telegram cache remains).

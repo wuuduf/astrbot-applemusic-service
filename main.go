@@ -2560,6 +2560,19 @@ type ChatDownloadSettings struct {
 	SettingsInited bool
 }
 
+func normalizeTransferModeForMedia(transferMode string, mediaType string, single bool) string {
+	if transferMode != transferModeZip {
+		transferMode = transferModeOneByOne
+	}
+	if mediaType == mediaTypeMusicVideo {
+		return transferModeOneByOne
+	}
+	if single && mediaType != mediaTypeSong {
+		return transferModeOneByOne
+	}
+	return transferMode
+}
+
 type TelegramBot struct {
 	token        string
 	apiBase      string
@@ -4883,8 +4896,21 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 	switch mode {
 	case transferModeOneByOne:
 		_ = b.editMessageText(chatID, messageID, "Transfer mode: one by one.", nil)
+		if mediaType == mediaTypeSong {
+			b.enqueueSongDownload(chatID, mediaID, pending.Storefront, replyToID, transferModeOneByOne)
+			return
+		}
 		b.enqueueCollectionDownload(chatID, mediaType, mediaID, pending.Storefront, replyToID, transferModeOneByOne)
 	case transferModeZip:
+		if mediaType == mediaTypeSong {
+			if b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
+				_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (cached).", nil)
+				return
+			}
+			_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP.", nil)
+			b.enqueueSongDownload(chatID, mediaID, pending.Storefront, replyToID, transferModeZip)
+			return
+		}
 		if b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
 			_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (cached).", nil)
 			return
@@ -4976,14 +5002,26 @@ func (b *TelegramBot) queueDownloadSongWithStorefront(chatID int64, songID strin
 		_ = b.sendMessage(chatID, "Song ID is empty.", nil)
 		return
 	}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+	b.promptMediaTransfer(chatID, mediaTypeSong, songID, storefront, "", replyToID)
+}
+
+func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefront string, replyToID int, transferMode string) {
+	if songID == "" {
+		_ = b.sendMessage(chatID, "Song ID is empty.", nil)
+		return
+	}
 	settings := b.getChatSettings(chatID)
-	if b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
+	transferMode = normalizeTransferModeForMedia(transferMode, mediaTypeSong, true)
+	if transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
 		return
 	}
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
-	b.enqueueDownload(chatID, replyToID, true, settings, transferModeOneByOne, mediaTypeSong, songID, func() error {
+	b.enqueueDownload(chatID, replyToID, true, settings, transferMode, mediaTypeSong, songID, func() error {
 		return ripSong(songID, b.appleToken, storefront, Config.MediaUserToken)
 	})
 }
@@ -5124,12 +5162,7 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 }
 
 func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, fn func() error) {
-	if transferMode != transferModeOneByOne && transferMode != transferModeZip {
-		transferMode = transferModeOneByOne
-	}
-	if single {
-		transferMode = transferModeOneByOne
-	}
+	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
 	settings = normalizeChatSettings(settings)
 	req := &downloadRequest{
 		chatID:       chatID,
@@ -5252,12 +5285,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, re
 		Config.SaveAnimatedArtwork = prevSaveAnimatedArtwork
 		botStaticCoverDownload = prevStaticCoverDownload
 	}()
-	if transferMode != transferModeZip {
-		transferMode = transferModeOneByOne
-	}
-	if single {
-		transferMode = transferModeOneByOne
-	}
+	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
 
 	Config.AacType = settings.AACType
 	Config.MVAudioType = settings.MVAudioType
@@ -5326,7 +5354,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, re
 	if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
 		paths = b.augmentDownloadedPaths(paths, settings)
 	}
-	if !single && transferMode == transferModeZip {
+	if transferMode == transferModeZip {
 		if status != nil {
 			status.Update("Zipping", 0, 0)
 		}

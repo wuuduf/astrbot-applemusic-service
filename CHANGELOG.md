@@ -18,7 +18,8 @@ All notable changes to this project will be documented in this file.
 - Help text and README docs updated to match real bot behavior.
 - CI artifacts and Docker config now use safe default config template.
 - Bot polling errors now redact Telegram token in console logs.
+- Telegram song download now supports transfer selection (`one` / `zip`) like collections.
+- AstrBot API download now allows `transfer_mode=zip` for `song` targets.
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.
-

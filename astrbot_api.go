@@ -986,7 +986,7 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 	if transferMode != transferModeZip {
 		transferMode = transferModeOneByOne
 	}
-	if req.MediaType == mediaTypeSong || req.MediaType == mediaTypeMusicVideo {
+	if req.MediaType == mediaTypeMusicVideo {
 		transferMode = transferModeOneByOne
 	}
 
@@ -1101,7 +1101,7 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 		TransferMode: transferMode,
 		Files:        files,
 	}
-	if transferMode == transferModeZip && primaryCount > 1 {
+	if transferMode == transferModeZip && (primaryCount > 1 || req.MediaType == mediaTypeSong) {
 		zipPath, displayName, zerr := createZipFromPaths(paths)
 		if zerr == nil {
 			finalZip, perr := s.persistArtifactFile(zipPath, displayName)
