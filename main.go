@@ -2514,6 +2514,9 @@ func ripSong(songId string, token string, storefront string, mediaUserToken stri
 const (
 	defaultSearchLimit           = 8
 	defaultQueueSize             = 20
+	defaultTaskWorkerLimit       = 1
+	maxTaskWorkerLimit           = 4
+	downloadWorkerPoolSize       = 4
 	pendingTTL                   = 10 * time.Minute
 	defaultTelegramFormat        = "alac"
 	defaultTelegramAACType       = "aac-lc"
@@ -2599,7 +2602,11 @@ type TelegramBot struct {
 
 	queueMu       sync.Mutex
 	downloadQueue chan *downloadRequest
-	inProgress    bool
+	queueCond     *sync.Cond
+	workerLimit   int
+	activeWorkers int
+
+	downloadCoreMu sync.Mutex
 
 	cacheMu    sync.Mutex
 	cacheFile  string
@@ -2960,11 +2967,13 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		pendingTransfers:   make(map[int64]*PendingTransfer),
 		pendingArtistModes: make(map[int64]*PendingArtistMode),
 		downloadQueue:      make(chan *downloadRequest, queueSize),
+		workerLimit:        defaultTaskWorkerLimit,
 		cacheFile:          cacheFile,
 		cache:              make(map[string]CachedAudio),
 		docCache:           make(map[string]CachedDocument),
 		videoCache:         make(map[string]CachedVideo),
 	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.loadCache()
 	bot.startDownloadWorker()
 	return bot
@@ -3066,19 +3075,76 @@ func (b *TelegramBot) consumePendingUpdatesOnStart() int {
 }
 
 func (b *TelegramBot) startDownloadWorker() {
-	go func() {
-		for req := range b.downloadQueue {
-			b.queueMu.Lock()
-			b.inProgress = true
-			b.queueMu.Unlock()
+	for i := 0; i < downloadWorkerPoolSize; i++ {
+		go func() {
+			for req := range b.downloadQueue {
+				b.queueMu.Lock()
+				for b.activeWorkers >= b.workerLimit {
+					b.queueCond.Wait()
+				}
+				b.activeWorkers++
+				b.queueMu.Unlock()
 
-			b.runDownload(req.chatID, req.fn, req.single, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
+				b.runDownload(req.chatID, req.fn, req.single, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
 
-			b.queueMu.Lock()
-			b.inProgress = false
-			b.queueMu.Unlock()
+				b.queueMu.Lock()
+				if b.activeWorkers > 0 {
+					b.activeWorkers--
+				}
+				b.queueCond.Broadcast()
+				b.queueMu.Unlock()
+			}
+		}()
+	}
+}
+
+func normalizeTaskWorkerLimit(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	if limit > maxTaskWorkerLimit {
+		return maxTaskWorkerLimit
+	}
+	return limit
+}
+
+func parseTaskWorkerLimit(raw string) (int, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return 0, false
+	}
+	for _, prefix := range []string{"workers", "worker", "threads", "thread"} {
+		if strings.HasPrefix(value, prefix) {
+			value = strings.TrimPrefix(value, prefix)
+			break
 		}
-	}()
+	}
+	value = strings.TrimSpace(strings.Trim(value, "=:_-x"))
+	if value == "" {
+		return 0, false
+	}
+	num, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return normalizeTaskWorkerLimit(num), true
+}
+
+func (b *TelegramBot) getTaskWorkerLimit() int {
+	b.queueMu.Lock()
+	defer b.queueMu.Unlock()
+	return b.workerLimit
+}
+
+func (b *TelegramBot) setTaskWorkerLimit(limit int) int {
+	normalized := normalizeTaskWorkerLimit(limit)
+	b.queueMu.Lock()
+	b.workerLimit = normalized
+	if b.queueCond != nil {
+		b.queueCond.Broadcast()
+	}
+	b.queueMu.Unlock()
+	return normalized
 }
 
 func normalizeTelegramFormat(format string) string {
@@ -3714,36 +3780,43 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if strings.HasPrefix(data, "setting_format:") {
 		format := strings.TrimPrefix(data, "setting_format:")
 		settings := b.setChatFormat(cb.Message.Chat.ID, format)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting_aac:") {
 		aacType := strings.TrimPrefix(data, "setting_aac:")
 		settings := b.setChatAACType(cb.Message.Chat.ID, aacType)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting_mv_audio:") {
 		mvAudioType := strings.TrimPrefix(data, "setting_mv_audio:")
 		settings := b.setChatMVAudioType(cb.Message.Chat.ID, mvAudioType)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting_lyrics_format:") {
 		lyricsFormat := strings.TrimPrefix(data, "setting_lyrics_format:")
 		settings := b.setChatLyricsFormat(cb.Message.Chat.ID, lyricsFormat)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if data == "setting_auto:lyrics" {
 		settings := b.toggleChatAutoLyrics(cb.Message.Chat.ID)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if data == "setting_auto:cover" {
 		settings := b.toggleChatAutoCover(cb.Message.Chat.ID)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if data == "setting_auto:animated" {
 		settings := b.toggleChatAutoAnimated(cb.Message.Chat.ID)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if data == "setting_song_zip" {
 		settings := b.toggleChatSongZip(cb.Message.Chat.ID)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
+	} else if strings.HasPrefix(data, "setting_worker:") {
+		workerRaw := strings.TrimPrefix(data, "setting_worker:")
+		if limit, ok := parseTaskWorkerLimit(workerRaw); ok {
+			_ = b.setTaskWorkerLimit(limit)
+		}
+		settings := b.getChatSettings(cb.Message.Chat.ID)
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting:") {
 		// Backward compatibility for old callbacks.
 		format := strings.TrimPrefix(data, "setting:")
 		settings := b.setChatFormat(cb.Message.Chat.ID, format)
-		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, formatSettingsText(settings), buildSettingsKeyboard(settings))
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "transfer:") {
 		mode := strings.TrimPrefix(data, "transfer:")
 		b.handleMediaTransfer(cb.Message.Chat.ID, cb.Message.MessageID, mode)
@@ -3977,22 +4050,28 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 			raw := strings.ToLower(strings.TrimSpace(args[0]))
 			if normalized := normalizeTelegramFormat(raw); normalized != "" {
 				settings = b.setChatFormat(chatID, normalized)
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
 			if normalized := normalizeTelegramAACType(raw); normalized != "" {
 				settings = b.setChatAACType(chatID, normalized)
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
 			if normalized := normalizeTelegramMVAudioType(raw); normalized != "" {
 				settings = b.setChatMVAudioType(chatID, normalized)
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
 			if normalized := normalizeTelegramLyricsFormat(raw); normalized != "" {
 				settings = b.setChatLyricsFormat(chatID, normalized)
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
+				return
+			}
+			if workerLimit, ok := parseTaskWorkerLimit(raw); ok {
+				b.setTaskWorkerLimit(workerLimit)
+				settings = b.getChatSettings(chatID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
 			switch raw {
@@ -4008,7 +4087,7 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 				} else {
 					settings = b.toggleChatAutoLyrics(chatID)
 				}
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			case "cover", "cover_on", "cover_off":
 				if raw == "cover_on" {
@@ -4022,7 +4101,7 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 				} else {
 					settings = b.toggleChatAutoCover(chatID)
 				}
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			case "animated", "animated_on", "animated_off":
 				if raw == "animated_on" {
@@ -4036,30 +4115,30 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 				} else {
 					settings = b.toggleChatAutoAnimated(chatID)
 				}
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			case "songzip", "song_zip", "songzip_toggle", "song_zip_toggle":
 				settings = b.toggleChatSongZip(chatID)
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			case "songzip_on", "song_zip_on", "songzip_zip", "song_zip_zip":
 				if !settings.SongZip {
 					settings = b.toggleChatSongZip(chatID)
 				}
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			case "songzip_off", "song_zip_off", "song_one", "song_onebyone", "song_one_by_one":
 				if settings.SongZip {
 					settings = b.toggleChatSongZip(chatID)
 				}
-				_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
-			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip]", nil, replyToID)
+			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip|worker1..worker4]", nil, replyToID)
 			return
 		}
 		settings := b.getChatSettings(chatID)
-		_ = b.sendMessageWithReply(chatID, formatSettingsText(settings), buildSettingsKeyboard(settings), replyToID)
+		_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 	default:
 		_ = b.sendMessage(chatID, "Unknown command. Send /help for usage.", nil)
 	}
@@ -5268,13 +5347,10 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 		fn:           fn,
 	}
 	b.queueMu.Lock()
-	inProgress := b.inProgress
 	queueLen := len(b.downloadQueue)
 	queueCap := cap(b.downloadQueue)
-	position := queueLen + 1
-	if inProgress {
-		position++
-	}
+	activeWorkers := b.activeWorkers
+	workerLimit := b.workerLimit
 	queueFull := queueLen >= queueCap
 	b.queueMu.Unlock()
 
@@ -5288,8 +5364,8 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 		_ = b.sendMessageWithReply(chatID, "Download queue is full. Please try again later.", nil, replyToID)
 		return
 	}
-	if inProgress || queueLen > 0 {
-		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Queued. Position: %d", position), nil, replyToID)
+	if queueLen > 0 || activeWorkers >= workerLimit {
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", queueLen+1, activeWorkers, workerLimit), nil, replyToID)
 	}
 }
 
@@ -5343,80 +5419,14 @@ func (b *TelegramBot) trySendCachedMusicVideo(chatID int64, replyToID int, mvID 
 }
 
 func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, replyToID int, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string) {
-
-	lastDownloadedPaths = nil
-	downloadedMetaMu.Lock()
-	downloadedMeta = make(map[string]AudioMeta)
-	downloadedMetaMu.Unlock()
-	counter = structs.Counter{}
-	okDict = make(map[string][]int)
-
-	dl_atmos = false
-	dl_aac = false
-	dl_select = false
-	if single {
-		dl_song = true
-	} else {
-		dl_song = false
-	}
-
-	settings = normalizeChatSettings(settings)
-	format := settings.Format
-	prevAacType := Config.AacType
-	prevMVAudioType := Config.MVAudioType
-	prevLrcFormat := Config.LrcFormat
-	prevSaveLrcFile := Config.SaveLrcFile
-	prevEmbedLrc := Config.EmbedLrc
-	prevSaveAnimatedArtwork := Config.SaveAnimatedArtwork
-	prevStaticCoverDownload := botStaticCoverDownload
-	defer func() {
-		Config.AacType = prevAacType
-		Config.MVAudioType = prevMVAudioType
-		Config.LrcFormat = prevLrcFormat
-		Config.SaveLrcFile = prevSaveLrcFile
-		Config.EmbedLrc = prevEmbedLrc
-		Config.SaveAnimatedArtwork = prevSaveAnimatedArtwork
-		botStaticCoverDownload = prevStaticCoverDownload
-	}()
-	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
-
-	Config.AacType = settings.AACType
-	Config.MVAudioType = settings.MVAudioType
-	if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
-		Config.LrcFormat = settings.LyricsFormat
-		Config.SaveLrcFile = settings.AutoLyrics
-		Config.EmbedLrc = false
-		Config.SaveAnimatedArtwork = settings.AutoAnimated
-		botStaticCoverDownload = settings.AutoCover
-	}
-
-	switch format {
-	case telegramFormatAtmos:
-		dl_atmos = true
-	case telegramFormatAac:
-		dl_aac = true
-	}
-
 	defer b.cleanupDownloadsIfNeeded()
-	Config.ConvertAfterDownload = false
-	if format == telegramFormatFlac {
-		Config.ConvertAfterDownload = true
-		Config.ConvertFormat = telegramFormatFlac
-		Config.ConvertKeepOriginal = false
-		Config.ConvertSkipLossyToLossless = false
-		if _, err := exec.LookPath(Config.FFmpegPath); err != nil {
-			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("ffmpeg not found at '%s'.", Config.FFmpegPath), nil, replyToID)
-			dl_song = false
-			return
-		}
-	} else {
-		Config.ConvertFormat = ""
-	}
+	settings = normalizeChatSettings(settings)
+	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
+	format := settings.Format
 
 	status, err := newDownloadStatus(b, chatID, replyToID)
 	if err != nil {
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
-		dl_song = false
 		return
 	}
 	defer status.Stop()
@@ -5424,29 +5434,113 @@ func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, re
 	progress := func(phase string, done, total int64) {
 		status.Update(phase, done, total)
 	}
-	activeProgress = progress
-	defer func() { activeProgress = nil }()
+	noFilesErr := errors.New("no files were downloaded")
+	paths := []string{}
+	primaryCount := 0
+	coreErr := func() error {
+		// Downloader core relies on shared global state; serialize this phase for stability.
+		b.downloadCoreMu.Lock()
+		defer b.downloadCoreMu.Unlock()
 
-	status.Update("Downloading", 0, 0)
-	err = fn()
-	if err != nil {
-		status.UpdateSync(fmt.Sprintf("Failed: %v", err), 0, 0)
-		dl_song = false
+		lastDownloadedPaths = nil
+		downloadedMetaMu.Lock()
+		downloadedMeta = make(map[string]AudioMeta)
+		downloadedMetaMu.Unlock()
+		counter = structs.Counter{}
+		okDict = make(map[string][]int)
+
+		dl_atmos = false
+		dl_aac = false
+		dl_select = false
+		if single {
+			dl_song = true
+		} else {
+			dl_song = false
+		}
+		defer func() { dl_song = false }()
+
+		prevAacType := Config.AacType
+		prevMVAudioType := Config.MVAudioType
+		prevLrcFormat := Config.LrcFormat
+		prevSaveLrcFile := Config.SaveLrcFile
+		prevEmbedLrc := Config.EmbedLrc
+		prevSaveAnimatedArtwork := Config.SaveAnimatedArtwork
+		prevStaticCoverDownload := botStaticCoverDownload
+		prevConvertAfterDownload := Config.ConvertAfterDownload
+		prevConvertFormat := Config.ConvertFormat
+		prevConvertKeepOriginal := Config.ConvertKeepOriginal
+		prevConvertSkipLossy := Config.ConvertSkipLossyToLossless
+		defer func() {
+			Config.AacType = prevAacType
+			Config.MVAudioType = prevMVAudioType
+			Config.LrcFormat = prevLrcFormat
+			Config.SaveLrcFile = prevSaveLrcFile
+			Config.EmbedLrc = prevEmbedLrc
+			Config.SaveAnimatedArtwork = prevSaveAnimatedArtwork
+			botStaticCoverDownload = prevStaticCoverDownload
+			Config.ConvertAfterDownload = prevConvertAfterDownload
+			Config.ConvertFormat = prevConvertFormat
+			Config.ConvertKeepOriginal = prevConvertKeepOriginal
+			Config.ConvertSkipLossyToLossless = prevConvertSkipLossy
+		}()
+
+		Config.AacType = settings.AACType
+		Config.MVAudioType = settings.MVAudioType
+		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
+			Config.LrcFormat = settings.LyricsFormat
+			Config.SaveLrcFile = settings.AutoLyrics
+			Config.EmbedLrc = false
+			Config.SaveAnimatedArtwork = settings.AutoAnimated
+			botStaticCoverDownload = settings.AutoCover
+		}
+
+		switch format {
+		case telegramFormatAtmos:
+			dl_atmos = true
+		case telegramFormatAac:
+			dl_aac = true
+		}
+
+		Config.ConvertAfterDownload = false
+		if format == telegramFormatFlac {
+			Config.ConvertAfterDownload = true
+			Config.ConvertFormat = telegramFormatFlac
+			Config.ConvertKeepOriginal = false
+			Config.ConvertSkipLossyToLossless = false
+			if _, err := exec.LookPath(Config.FFmpegPath); err != nil {
+				return fmt.Errorf("ffmpeg not found at '%s'", Config.FFmpegPath)
+			}
+		} else {
+			Config.ConvertFormat = ""
+		}
+
+		activeProgress = progress
+		defer func() { activeProgress = nil }()
+
+		status.Update("Downloading", 0, 0)
+		if err := fn(); err != nil {
+			return err
+		}
+
+		paths = append([]string{}, lastDownloadedPaths...)
+		primaryCount = len(paths)
+		if len(paths) == 0 {
+			return noFilesErr
+		}
+		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
+			paths = b.augmentDownloadedPaths(paths, settings)
+		}
+		return nil
+	}()
+	if coreErr != nil {
+		if errors.Is(coreErr, noFilesErr) {
+			status.UpdateSync("No files were downloaded.", 0, 0)
+			return
+		}
+		status.UpdateSync(fmt.Sprintf("Failed: %v", coreErr), 0, 0)
 		return
 	}
-	dl_song = false
 
-	activeProgress = nil
-
-	paths := append([]string{}, lastDownloadedPaths...)
-	primaryCount := len(paths)
-	if len(paths) == 0 {
-		status.UpdateSync("No files were downloaded.", 0, 0)
-		return
-	}
-	if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
-		paths = b.augmentDownloadedPaths(paths, settings)
-	}
 	if transferMode == transferModeZip {
 		if status != nil {
 			status.Update("Zipping", 0, 0)
@@ -7494,30 +7588,33 @@ func settingButtonText(label string, active bool) string {
 	return label
 }
 
-func formatSettingsText(settings ChatDownloadSettings) string {
+func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 	normalized := normalizeChatSettings(settings)
 	songTransfer := "one-by-one"
 	if normalized.SongZip {
 		songTransfer = "zip"
 	}
-	return fmt.Sprintf("Download settings:\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Auto extra: lyrics=%t cover=%t animated=%t",
+	workers := b.getTaskWorkerLimit()
+	return fmt.Sprintf("Download settings:\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Auto extra: lyrics=%t cover=%t animated=%t",
 		strings.ToUpper(normalized.Format),
 		normalized.AACType,
 		normalized.MVAudioType,
 		strings.ToUpper(normalized.LyricsFormat),
 		songTransfer,
+		workers,
 		normalized.AutoLyrics,
 		normalized.AutoCover,
 		normalized.AutoAnimated,
 	)
 }
 
-func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
+func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 	normalized := normalizeChatSettings(settings)
 	format := normalized.Format
 	aacType := normalized.AACType
 	mvAudioType := normalized.MVAudioType
 	lyricsFormat := normalized.LyricsFormat
+	workers := b.getTaskWorkerLimit()
 	return InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
@@ -7549,6 +7646,14 @@ func buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 				{Text: settingButtonText("Song ZIP", normalized.SongZip), CallbackData: "setting_song_zip"},
 			},
 			{
+				{Text: settingButtonText("线程 1", workers == 1), CallbackData: "setting_worker:1"},
+				{Text: settingButtonText("线程 2", workers == 2), CallbackData: "setting_worker:2"},
+			},
+			{
+				{Text: settingButtonText("线程 3", workers == 3), CallbackData: "setting_worker:3"},
+				{Text: settingButtonText("线程 4", workers == 4), CallbackData: "setting_worker:4"},
+			},
+			{
 				{Text: settingButtonText("Auto Lyrics", normalized.AutoLyrics), CallbackData: "setting_auto:lyrics"},
 				{Text: settingButtonText("Auto Cover", normalized.AutoCover), CallbackData: "setting_auto:cover"},
 				{Text: settingButtonText("Auto Animated", normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
@@ -7574,12 +7679,13 @@ func botHelpText() string {
 /cv <url|type id> 仅下载封面
 /ac <url|type id> 仅下载动态封面
 /ly <song|album> 导出歌词文件（格式由设置决定）
-/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/自动附加）
+/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/自动附加）
 
 参数说明：
 - /s 的 <类型>：song | album | artist
 - /cv 的 type：song | album | playlist | station | mv | artist
 - /ac 的 type：song | album | playlist | station
+- /st 任务线程：worker1 | worker2 | worker3 | worker4（默认 worker1）
 
 也支持直接发送 Apple Music 链接（自动识别）：
 song | album | playlist | artist | station | music-video

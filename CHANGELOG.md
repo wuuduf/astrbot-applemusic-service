@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - CI artifacts and Docker config now use safe default config template.
 - Bot polling errors now redact Telegram token in console logs.
 - Telegram song download transfer now follows per-chat setting (`songzip`) instead of prompting transfer selection.
+- Telegram task worker count is now configurable in settings (`worker1` ... `worker4`, default `worker1`).
 - AstrBot API download now allows `transfer_mode=zip` for `song` targets.
 - Unauthorized reply now includes `chat_id` hint to help configure `telegram-allowed-chat-ids`.
 - Telegram auto-cleanup now also considers `AMDL_TMPDIR`/`TMPDIR` when set to dedicated paths (shared `/tmp` and `/var/tmp` are skipped).

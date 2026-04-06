@@ -154,7 +154,7 @@ Notes:
    - `/cv <apple-music-url>` or `/cv <song|album|playlist|station|mv|artist> <id>` download cover only
    - `/ac <apple-music-url>` or `/ac <song|album|playlist|station> <id>` download animated cover only
    - `/ly <song-url|song-id|album-url|album <id>>` export lyrics files (format from settings)
-   - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip]`
+   - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip|worker1..worker4]`
    - Legacy commands are still supported for compatibility:
    `/help /id /search_song /search_album /search_artist /search /url /artistphoto /cover /animatedcover /lyrics /settings`
 
@@ -171,6 +171,7 @@ Notes:
 - `/settings` also controls lyrics format (`lrc`/`ttml`) and auto extra options (`lyrics`/`cover`/`animated`, all disabled by default).
 - Artist flow supports a second step: choose `Albums` or `Music Videos`.
 - Song transfer follows `/st songzip` (on: ZIP, off: one-by-one) and no longer prompts for selection.
+- Task workers are configurable from settings (default single worker): `/st worker1` ... `/st worker4`.
 - Album/Playlist/Station still provide transfer selection: `one by one` or `ZIP`.
 - ZIP results are cached via Telegram `file_id` for song/album/playlist/station.
 - MV supports send-as-video, fallback-to-document, and Telegram `file_id` cache re-send.
