@@ -169,6 +169,7 @@ Notes:
 Notes:
 - Default format is ALAC. `/settings` now supports ALAC/FLAC/AAC/Atmos plus AAC profile and MV audio profile.
 - `/settings` also controls lyrics format (`lrc`/`ttml`) and auto extra options (`lyrics`/`cover`/`animated`, all disabled by default).
+- In Telegram `song` mode, audio metadata always embeds lyrics + cover. Auto extra options only control additional files sent separately.
 - Artist flow supports a second step: choose `Albums` or `Music Videos`.
 - Song transfer follows `/st songzip` (on: ZIP, off: one-by-one) and no longer prompts for selection.
 - Task workers are configurable from settings (default single worker): `/st worker1` ... `/st worker4`.

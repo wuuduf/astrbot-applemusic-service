@@ -5679,6 +5679,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, re
 		prevLrcFormat := Config.LrcFormat
 		prevSaveLrcFile := Config.SaveLrcFile
 		prevEmbedLrc := Config.EmbedLrc
+		prevEmbedCover := Config.EmbedCover
 		prevSaveAnimatedArtwork := Config.SaveAnimatedArtwork
 		prevStaticCoverDownload := botStaticCoverDownload
 		prevConvertAfterDownload := Config.ConvertAfterDownload
@@ -5691,6 +5692,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, re
 			Config.LrcFormat = prevLrcFormat
 			Config.SaveLrcFile = prevSaveLrcFile
 			Config.EmbedLrc = prevEmbedLrc
+			Config.EmbedCover = prevEmbedCover
 			Config.SaveAnimatedArtwork = prevSaveAnimatedArtwork
 			botStaticCoverDownload = prevStaticCoverDownload
 			Config.ConvertAfterDownload = prevConvertAfterDownload
@@ -5701,7 +5703,16 @@ func (b *TelegramBot) runDownload(chatID int64, fn func() error, single bool, re
 
 		Config.AacType = settings.AACType
 		Config.MVAudioType = settings.MVAudioType
-		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
+		if mediaType == mediaTypeSong {
+			// Song mode: always embed lyrics + cover into audio metadata.
+			Config.LrcFormat = settings.LyricsFormat
+			Config.SaveLrcFile = settings.AutoLyrics
+			Config.EmbedLrc = true
+			Config.EmbedCover = true
+			Config.SaveAnimatedArtwork = settings.AutoAnimated
+			// Keep static cover download enabled so embed-cover has a source file.
+			botStaticCoverDownload = true
+		} else if mediaType == mediaTypeAlbum {
 			Config.LrcFormat = settings.LyricsFormat
 			Config.SaveLrcFile = settings.AutoLyrics
 			Config.EmbedLrc = false

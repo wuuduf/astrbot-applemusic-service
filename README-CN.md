@@ -128,6 +128,7 @@ docker run --rm -it \
 注意：
 - 默认格式是 ALAC。`/settings` 已支持 ALAC/FLAC/AAC/Atmos，并可设置 AAC Profile 与 MV 音轨类型。
 - `/settings` 也支持歌词格式（`lrc`/`ttml`）与自动附加项开关（`lyrics`/`cover`/`animated`，默认全关）。
+- Telegram 的 `song` 模式会始终把歌词和封面内嵌到音频元数据；自动附加开关仅影响“额外文件是否单独发送”。
 - 艺人流程已支持二级选择：`Albums` 或 `Music Videos`。
 - Song 传输方式由 `/st songzip` 控制（开=ZIP，关=逐个），不再弹出二次选择。
 - 任务线程可在设置中调整（默认单线程）：`/st worker1` ... `/st worker4`。

@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file.
 - Telegram auto extras (`lyrics` / `cover` / `animated`) are now disabled by default for new chat settings.
 - Apple API/downloader outbound requests now use a shared HTTP client with configurable timeout (`AMDL_HTTP_TIMEOUT_SEC`, default `45s`).
 - `runv2` now uses configurable stream idle timeout (`AMDL_RUNV2_IDLE_TIMEOUT_SEC`, default `300s`) instead of unlimited waits.
+- Telegram `song` downloads now always embed lyrics + cover into the audio file; auto extras (`lyrics/cover/animated`) now only affect separate attachment sending.
 
 ### Fixed
 - `go vet` protobuf lock-copy warning in `utils/runv3/cdm/cdm.go`.
