@@ -65,6 +65,7 @@ var (
 	downloadedMeta         = make(map[string]AudioMeta)
 	searchMetaMu           sync.Mutex
 	searchMetaByID         = make(map[string]AudioMeta)
+	networkHTTPClient      = &http.Client{Timeout: 45 * time.Second}
 )
 
 type AudioMeta struct {
@@ -375,7 +376,7 @@ func getUrlArtistName(artistUrl string, token string) (string, string, error) {
 	query := url.Values{}
 	query.Set("l", Config.Language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := networkHTTPClient.Do(req)
 	if err != nil {
 		return "", "", err
 	}
@@ -406,7 +407,7 @@ func checkArtist(artistUrl string, token string, relationship string) ([]string,
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 		req.Header.Set("Origin", "https://music.apple.com")
-		do, err := http.DefaultClient.Do(req)
+		do, err := networkHTTPClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -553,7 +554,7 @@ func writeCover(sanAlbumFolder, name string, url string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	do, err := http.DefaultClient.Do(req)
+	do, err := networkHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -572,7 +573,7 @@ func writeCover(sanAlbumFolder, name string, url string) (string, error) {
 				return "", err
 			}
 			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-			do, err = http.DefaultClient.Do(req)
+			do, err = networkHTTPClient.Do(req)
 			if err != nil {
 				fmt.Println("Failed to get cover from fallback url.")
 				return "", err
@@ -2094,7 +2095,7 @@ func extractMvAudio(c string) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.Get(c)
+	resp, err := networkHTTPClient.Get(c)
 	if err != nil {
 		return "", err
 	}
@@ -2226,7 +2227,7 @@ func extractMedia(b string, more_mode bool) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := http.Get(b)
+	resp, err := networkHTTPClient.Get(b)
 	if err != nil {
 		return "", "", err
 	}
@@ -2386,7 +2387,7 @@ func extractMedia(b string, more_mode bool) (string, string, error) {
 					}
 					streamUrlTemp, err := masterUrl.Parse(variant.URI)
 					if err != nil {
-						panic(err)
+						return "", "", err
 					}
 					streamUrl = streamUrlTemp
 					split := strings.Split(variant.Audio, "-")
@@ -2408,7 +2409,7 @@ func extractMedia(b string, more_mode bool) (string, string, error) {
 					}
 					streamUrlTemp, err := masterUrl.Parse(variant.URI)
 					if err != nil {
-						panic(err)
+						return "", "", err
 					}
 					streamUrl = streamUrlTemp
 					KHZ := float64(length_int) / 1000.0
@@ -2429,7 +2430,7 @@ func extractVideo(c string) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.Get(c)
+	resp, err := networkHTTPClient.Get(c)
 	if err != nil {
 		return "", err
 	}

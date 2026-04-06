@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,8 +28,11 @@ const (
 	astrbotArtifactMaxAge   = 24 * time.Hour
 )
 
+var astrbotAPIHTTPClient = &http.Client{Timeout: 45 * time.Second}
+
 type astrbotAPIService struct {
 	appleToken   string
+	apiToken     string
 	listenAddr   string
 	artifactRoot string
 
@@ -179,12 +184,17 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 	if listenAddr == "" {
 		listenAddr = defaultAstrBotAPIListen
 	}
+	apiToken := strings.TrimSpace(os.Getenv("ASTRBOT_API_TOKEN"))
+	if !isLoopbackListenAddr(listenAddr) && apiToken == "" {
+		return fmt.Errorf("refusing non-loopback bind (%s) without ASTRBOT_API_TOKEN", listenAddr)
+	}
 	artifactRoot := filepath.Join(os.TempDir(), "amdl-astrbot-api")
 	if err := os.MkdirAll(artifactRoot, 0755); err != nil {
 		return fmt.Errorf("failed to create artifact root: %w", err)
 	}
 	service := &astrbotAPIService{
 		appleToken:   token,
+		apiToken:     apiToken,
 		listenAddr:   listenAddr,
 		artifactRoot: artifactRoot,
 		jobs:         make(map[string]*astrbotJob),
@@ -209,10 +219,17 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	fmt.Printf("AstrBot API server listening on http://%s\n", service.listenAddr)
 	fmt.Printf("AstrBot API artifact root: %s\n", service.artifactRoot)
+	if apiToken == "" {
+		fmt.Println("AstrBot API auth: disabled (set ASTRBOT_API_TOKEN to enable)")
+	} else {
+		fmt.Println("AstrBot API auth: enabled (Authorization: Bearer <token> or X-AstrBot-Token)")
+	}
 	return srv.ListenAndServe()
 }
 
@@ -224,6 +241,10 @@ func (s *astrbotAPIService) withRecovery(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusInternalServerError, astrbotErrorResponse{Error: "internal server error"})
 			}
 		}()
+		if strings.HasPrefix(r.URL.Path, "/v1/") && !s.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, astrbotErrorResponse{Error: "unauthorized"})
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -231,15 +252,76 @@ func (s *astrbotAPIService) withRecovery(next http.Handler) http.Handler {
 func (s *astrbotAPIService) startWorker() {
 	go func() {
 		for job := range s.queue {
-			s.setJobRunning(job.ID)
-			result, err := s.executeDownload(job.Request)
-			if err != nil {
-				s.setJobFailed(job.ID, err)
-				continue
-			}
-			s.setJobCompleted(job.ID, result)
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						s.setJobFailed(job.ID, fmt.Errorf("worker panic: %v", rec))
+					}
+				}()
+				s.setJobRunning(job.ID)
+				result, err := s.executeDownload(job.Request)
+				if err != nil {
+					s.setJobFailed(job.ID, err)
+					return
+				}
+				s.setJobCompleted(job.ID, result)
+			}()
 		}
 	}()
+}
+
+func (s *astrbotAPIService) authorized(r *http.Request) bool {
+	if strings.TrimSpace(s.apiToken) == "" {
+		return true
+	}
+	if token := parseBearerToken(r.Header.Get("Authorization")); token != "" {
+		return secureTokenEqual(token, s.apiToken)
+	}
+	if token := strings.TrimSpace(r.Header.Get("X-AstrBot-Token")); token != "" {
+		return secureTokenEqual(token, s.apiToken)
+	}
+	return false
+}
+
+func parseBearerToken(raw string) string {
+	parts := strings.Fields(strings.TrimSpace(raw))
+	if len(parts) != 2 {
+		return ""
+	}
+	if !strings.EqualFold(parts[0], "bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func secureTokenEqual(got, want string) bool {
+	if got == "" || want == "" {
+		return false
+	}
+	if len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func isLoopbackListenAddr(listenAddr string) bool {
+	host := strings.TrimSpace(listenAddr)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func (s *astrbotAPIService) nextJobID() string {
@@ -262,6 +344,18 @@ func (s *astrbotAPIService) addJob(req astrbotDownloadRequest) *astrbotJob {
 	s.pruneJobsLocked()
 	s.mu.Unlock()
 	return job
+}
+
+func (s *astrbotAPIService) removeJob(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.jobs, id)
+	for idx, jobID := range s.order {
+		if jobID == id {
+			s.order = append(s.order[:idx], s.order[idx+1:]...)
+			break
+		}
+	}
 }
 
 func (s *astrbotAPIService) pruneJobsLocked() {
@@ -338,10 +432,11 @@ func (s *astrbotAPIService) handleHealth(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"service":   "apple-music-downloader-bot",
-		"mode":      "astrbot-api",
-		"timestamp": time.Now(),
+		"ok":            true,
+		"service":       "apple-music-downloader-bot",
+		"mode":          "astrbot-api",
+		"auth_required": strings.TrimSpace(s.apiToken) != "",
+		"timestamp":     time.Now(),
 	})
 }
 
@@ -546,6 +641,7 @@ func (s *astrbotAPIService) handleDownload(w http.ResponseWriter, r *http.Reques
 			"created_at": job.CreatedAt,
 		})
 	default:
+		s.removeJob(job.ID)
 		writeJSON(w, http.StatusServiceUnavailable, astrbotErrorResponse{Error: "download queue is full"})
 	}
 }
@@ -1309,7 +1405,7 @@ func (s *astrbotAPIService) fetchArtistProfile(storefront string, artistID strin
 		query.Set("l", Config.Language)
 	}
 	req.URL.RawQuery = query.Encode()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := astrbotAPIHTTPClient.Do(req)
 	if err != nil {
 		return "", "", err
 	}
@@ -1468,9 +1564,12 @@ func (s *astrbotAPIService) persistArtifactFile(srcPath string, displayName stri
 }
 
 func (s *astrbotAPIService) writeArtifactTextFile(displayName string, content string) (string, error) {
-	displayName = strings.TrimSpace(displayName)
+	displayName = sanitizeFileBaseName(displayName)
 	if displayName == "" {
 		displayName = fmt.Sprintf("lyrics-%d.txt", time.Now().UnixMilli())
+	}
+	if filepath.Ext(displayName) == "" {
+		displayName += ".txt"
 	}
 	targetPath := filepath.Join(s.artifactRoot, displayName)
 	if _, err := os.Stat(targetPath); err == nil {
@@ -1531,8 +1630,13 @@ func boolPtr(v bool) *bool {
 func decodeJSON(body io.ReadCloser, dst any) error {
 	defer body.Close()
 	decoder := json.NewDecoder(io.LimitReader(body, 5*1024*1024))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		return fmt.Errorf("invalid json: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("invalid json: multiple json values")
 	}
 	return nil
 }
