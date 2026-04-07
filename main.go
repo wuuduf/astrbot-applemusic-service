@@ -2771,6 +2771,29 @@ func normalizeTransferModeForMedia(transferMode string, mediaType string, single
 	return transferMode
 }
 
+func telegramMediaProducesSongAudio(mediaType string) bool {
+	switch mediaType {
+	case mediaTypeSong, mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation:
+		return true
+	default:
+		return false
+	}
+}
+
+func applyTelegramAudioEmbeddingPolicy(session *DownloadSession, settings ChatDownloadSettings, mediaType string) {
+	if session == nil || !telegramMediaProducesSongAudio(mediaType) {
+		return
+	}
+	// Always embed lyrics + cover for downloaded song audio, regardless of extra-file toggles.
+	session.Config.LrcFormat = settings.LyricsFormat
+	session.Config.SaveLrcFile = settings.AutoLyrics
+	session.Config.EmbedLrc = true
+	session.Config.EmbedCover = true
+	session.Config.SaveAnimatedArtwork = settings.AutoAnimated
+	// Keep static cover download enabled so cover embedding always has a source file.
+	session.StaticCoverDownload = true
+}
+
 type TelegramBot struct {
 	token        string
 	apiBase      string
@@ -5948,22 +5971,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		}
 		session.Config.AacType = settings.AACType
 		session.Config.MVAudioType = settings.MVAudioType
-		if mediaType == mediaTypeSong {
-			// Song mode: always embed lyrics + cover into audio metadata.
-			session.Config.LrcFormat = settings.LyricsFormat
-			session.Config.SaveLrcFile = settings.AutoLyrics
-			session.Config.EmbedLrc = true
-			session.Config.EmbedCover = true
-			session.Config.SaveAnimatedArtwork = settings.AutoAnimated
-			// Keep static cover download enabled so embed-cover has a source file.
-			session.StaticCoverDownload = true
-		} else if mediaType == mediaTypeAlbum {
-			session.Config.LrcFormat = settings.LyricsFormat
-			session.Config.SaveLrcFile = settings.AutoLyrics
-			session.Config.EmbedLrc = false
-			session.Config.SaveAnimatedArtwork = settings.AutoAnimated
-			session.StaticCoverDownload = settings.AutoCover
-		}
+		applyTelegramAudioEmbeddingPolicy(session, settings, mediaType)
 
 		switch format {
 		case telegramFormatAtmos:
