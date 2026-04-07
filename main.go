@@ -5700,6 +5700,7 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 		return
 	}
 	if transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
+		b.sendCachedSongAutoExtras(chatID, replyToID, songID, storefront, settings)
 		return
 	}
 	if storefront == "" {
@@ -5708,6 +5709,97 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 	b.enqueueDownload(chatID, replyToID, true, settings, transferMode, mediaTypeSong, songID, func(session *DownloadSession) error {
 		return ripSong(session, songID, b.appleToken, storefront, session.Config.MediaUserToken)
 	})
+}
+
+func hasSongAutoExtras(settings ChatDownloadSettings) bool {
+	normalized := normalizeChatSettings(settings)
+	return normalized.AutoLyrics || normalized.AutoCover || normalized.AutoAnimated
+}
+
+func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, songID string, storefront string, settings ChatDownloadSettings) {
+	normalized := normalizeChatSettings(settings)
+	if !hasSongAutoExtras(normalized) {
+		return
+	}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+
+	baseName := "song-" + songID
+	if meta, err := b.fetchTrackMeta(songID); err == nil {
+		if title := composeArtistTitle(meta.Performer, meta.Title); strings.TrimSpace(title) != "" {
+			baseName = title
+		}
+	}
+
+	if normalized.AutoLyrics {
+		outputFormat := normalizeLyricsOutputFormat(normalized.LyricsFormat)
+		if outputFormat == "" {
+			outputFormat = defaultTelegramLyricsFormat
+		}
+		content, _, err := b.fetchLyricsOnly(songID, storefront, outputFormat)
+		if err != nil {
+			fmt.Printf("cached song extra lyrics skipped (%s): %v\n", songID, err)
+		} else if strings.TrimSpace(content) != "" {
+			displayName := sanitizeFileBaseName(baseName) + ".lyrics." + outputFormat
+			if err := b.sendTextAsDocument(chatID, replyToID, displayName, outputFormat, content); err != nil {
+				fmt.Printf("send cached lyrics error (%s): %v\n", songID, err)
+			}
+		}
+	}
+
+	needArtwork := normalized.AutoCover || normalized.AutoAnimated
+	if !needArtwork {
+		return
+	}
+	info, err := b.fetchArtwork(&AppleURLTarget{
+		MediaType:  mediaTypeSong,
+		ID:         songID,
+		Storefront: storefront,
+	})
+	if err != nil {
+		fmt.Printf("cached song extra artwork skipped (%s): %v\n", songID, err)
+		return
+	}
+	displayBase := sanitizeFileBaseName(firstNonEmpty(info.DisplayName, baseName))
+
+	if normalized.AutoCover && strings.TrimSpace(info.CoverURL) != "" {
+		coverPath, tmpDir, err := renderCoverToTemp(info.CoverURL)
+		if err != nil {
+			fmt.Printf("cached song extra cover skipped (%s): %v\n", songID, err)
+		} else {
+			displayName := displayBase + "-cover" + strings.ToLower(filepath.Ext(coverPath))
+			if err := b.sendDocumentFile(chatID, coverPath, displayName, replyToID, nil, ""); err != nil {
+				fmt.Printf("send cached cover error (%s): %v\n", songID, err)
+			}
+			_ = os.RemoveAll(tmpDir)
+		}
+	}
+
+	if normalized.AutoAnimated && strings.TrimSpace(info.MotionURL) != "" {
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			fmt.Printf("cached song extra animated skipped (%s): ffmpeg not found\n", songID)
+			return
+		}
+		tmp, err := os.CreateTemp("", "amdl-cached-song-animated-*.mp4")
+		if err != nil {
+			fmt.Printf("cached song extra animated skipped (%s): %v\n", songID, err)
+			return
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		defer os.Remove(tmpPath)
+		if err := b.saveAnimatedCover(info.MotionURL, tmpPath); err != nil {
+			fmt.Printf("cached song extra animated skipped (%s): %v\n", songID, err)
+			return
+		}
+		if err := b.sendVideoFile(chatID, tmpPath, replyToID, "", nil, ""); err != nil {
+			displayName := displayBase + "-animated-cover.mp4"
+			if docErr := b.sendDocumentFile(chatID, tmpPath, displayName, replyToID, nil, ""); docErr != nil {
+				fmt.Printf("send cached animated cover error (%s): %v; fallback: %v\n", songID, err, docErr)
+			}
+		}
+	}
 }
 
 func (b *TelegramBot) queueDownloadAlbum(chatID int64, albumID string) {

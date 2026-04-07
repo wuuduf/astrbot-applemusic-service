@@ -216,3 +216,18 @@ func TestPendingArtistModeIsolatedByMessageID(t *testing.T) {
 		t.Fatalf("message 302 artist mode should remain")
 	}
 }
+
+func TestHasSongAutoExtras(t *testing.T) {
+	if hasSongAutoExtras(ChatDownloadSettings{}) {
+		t.Fatalf("expected false for empty settings")
+	}
+	if !hasSongAutoExtras(ChatDownloadSettings{AutoLyrics: true, SettingsInited: true}) {
+		t.Fatalf("expected true when AutoLyrics enabled")
+	}
+	if !hasSongAutoExtras(ChatDownloadSettings{AutoCover: true, SettingsInited: true}) {
+		t.Fatalf("expected true when AutoCover enabled")
+	}
+	if !hasSongAutoExtras(ChatDownloadSettings{AutoAnimated: true, SettingsInited: true}) {
+		t.Fatalf("expected true when AutoAnimated enabled")
+	}
+}
