@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
@@ -88,5 +89,27 @@ func TestApplyTelegramAudioEmbeddingPolicy(t *testing.T) {
 		if !session.StaticCoverDownload {
 			t.Fatalf("mediaType=%s expected StaticCoverDownload=true for cover embedding", mediaType)
 		}
+	}
+}
+
+func TestParseTelegramRetryAfterFromJSONBody(t *testing.T) {
+	err := errors.New(`telegram sendDocument failed: {"ok":false,"error_code":429,"description":"Too Many Requests: retry after 13","parameters":{"retry_after":13}}`)
+	got, ok := parseTelegramRetryAfter(err)
+	if !ok {
+		t.Fatalf("expected retry-after parse success")
+	}
+	if got != 13*time.Second {
+		t.Fatalf("expected 13s, got %s", got)
+	}
+}
+
+func TestParseTelegramRetryAfterFromDescription(t *testing.T) {
+	err := errors.New("telegram sendAudio failed: 429 Too Many Requests: retry after 7")
+	got, ok := parseTelegramRetryAfter(err)
+	if !ok {
+		t.Fatalf("expected retry-after parse success")
+	}
+	if got != 7*time.Second {
+		t.Fatalf("expected 7s, got %s", got)
 	}
 }

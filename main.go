@@ -46,6 +46,8 @@ import (
 
 var (
 	forbiddenNames    = regexp.MustCompile(`[/\\<>:"|?*]`)
+	retryAfterJSONRe  = regexp.MustCompile(`(?i)"retry_after"\s*:\s*(\d+)`)
+	retryAfterTextRe  = regexp.MustCompile(`(?i)retry\s+after\s+(\d+)`)
 	artist_select     bool
 	debug_mode        bool
 	alac_max          *int
@@ -6380,6 +6382,9 @@ func isRetryableUploadError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if _, ok := parseTelegramRetryAfter(err); ok {
+		return true
+	}
 	lower := strings.ToLower(err.Error())
 	retryableHints := []string{
 		"context deadline exceeded",
@@ -6394,6 +6399,7 @@ func isRetryableUploadError(err error) bool {
 		"unexpected eof",
 		"bad gateway",
 		"temporarily unavailable",
+		"too many requests",
 	}
 	for _, hint := range retryableHints {
 		if strings.Contains(lower, hint) {
@@ -6401,6 +6407,25 @@ func isRetryableUploadError(err error) bool {
 		}
 	}
 	return false
+}
+
+func parseTelegramRetryAfter(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	msg := err.Error()
+	for _, re := range []*regexp.Regexp{retryAfterJSONRe, retryAfterTextRe} {
+		matches := re.FindStringSubmatch(msg)
+		if len(matches) < 2 {
+			continue
+		}
+		sec, convErr := strconv.Atoi(matches[1])
+		if convErr != nil || sec <= 0 {
+			continue
+		}
+		return time.Duration(sec) * time.Second, true
+	}
+	return 0, false
 }
 
 func isPipeClosedError(err error) bool {
@@ -6538,7 +6563,8 @@ func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAtt
 		if lastErr == nil {
 			return nil
 		}
-		if attempt == maxAttempts || !isRetryableUploadError(lastErr) {
+		retryAfter, hasRetryAfter := parseTelegramRetryAfter(lastErr)
+		if attempt == maxAttempts || (!isRetryableUploadError(lastErr) && !hasRetryAfter) {
 			return lastErr
 		}
 		if status != nil {
@@ -6546,11 +6572,18 @@ func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAtt
 			if strings.TrimSpace(label) != "" {
 				phase = fmt.Sprintf("%s interrupted, retrying (%d/%d)", label, attempt+1, maxAttempts)
 			}
+			if hasRetryAfter {
+				phase = fmt.Sprintf("%s rate limited, retry after %ds (%d/%d)", strings.TrimSpace(label), int(retryAfter.Seconds()), attempt+1, maxAttempts)
+			}
 			status.Update(phase, 0, 0)
 		}
 		closeHTTPIdleConnections(b.client)
 		closeHTTPIdleConnections(b.pollClient)
-		time.Sleep(time.Duration(attempt) * time.Second)
+		if hasRetryAfter {
+			time.Sleep(retryAfter)
+		} else {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
 	}
 	return lastErr
 }
@@ -6812,11 +6845,16 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	if writeErr != nil {
 		return writeErr
 	}
+	responseBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram sendAudio failed: %s", resp.Status)
+		msg := strings.TrimSpace(string(responseBody))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return fmt.Errorf("telegram sendAudio failed: %s", msg)
 	}
 	apiResp := sendAudioResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
