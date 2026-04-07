@@ -3123,7 +3123,54 @@ func runTelegramBot(appleToken string) {
 	}()
 	fmt.Println("Telegram bot started. Waiting for updates...")
 	fmt.Printf("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)\n", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
-	bot.loop()
+	bot.loopWithAutoRestart()
+}
+
+func panicErrorWithStack(scope string, rec any) error {
+	label := strings.TrimSpace(scope)
+	if label == "" {
+		label = "runtime"
+	}
+	return fmt.Errorf("%s panic: %v\n%s", label, rec, string(debug.Stack()))
+}
+
+func logRecoveredPanic(scope string, rec any) error {
+	err := panicErrorWithStack(scope, rec)
+	fmt.Println(err.Error())
+	return err
+}
+
+func runWithRecovery(scope string, onPanic func(error), fn func()) (panicked bool) {
+	if fn == nil {
+		return false
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			panicked = true
+			err := logRecoveredPanic(scope, rec)
+			if onPanic != nil {
+				onPanic(err)
+			}
+		}
+	}()
+	fn()
+	return false
+}
+
+func (b *TelegramBot) loopWithAutoRestart() {
+	const restartDelay = 2 * time.Second
+	for {
+		panicked := runWithRecovery("telegram loop", nil, func() {
+			b.loop()
+		})
+		if !panicked {
+			return
+		}
+		fmt.Printf("telegram loop recovered from panic, restarting in %s\n", restartDelay)
+		closeHTTPIdleConnections(b.pollClient)
+		closeHTTPIdleConnections(b.client)
+		time.Sleep(restartDelay)
+	}
 }
 
 func normalizeTelegramAPIBase(raw string) string {
@@ -3461,15 +3508,45 @@ func (b *TelegramBot) loop() {
 			if upd.UpdateID >= offset {
 				offset = upd.UpdateID + 1
 			}
-			if upd.Message != nil {
-				b.handleMessage(upd.Message)
-			} else if upd.CallbackQuery != nil {
-				b.handleCallback(upd.CallbackQuery)
-			} else if upd.InlineQuery != nil {
-				b.handleInlineQuery(upd.InlineQuery)
-			}
+			b.dispatchUpdateSafely(upd)
 		}
 	}
+}
+
+func updateReplyContext(upd Update) (int64, int) {
+	if upd.Message != nil {
+		return upd.Message.Chat.ID, upd.Message.MessageID
+	}
+	if upd.CallbackQuery != nil && upd.CallbackQuery.Message != nil {
+		return upd.CallbackQuery.Message.Chat.ID, upd.CallbackQuery.Message.MessageID
+	}
+	return 0, 0
+}
+
+func (b *TelegramBot) dispatchUpdate(upd Update) {
+	if upd.Message != nil {
+		b.handleMessage(upd.Message)
+		return
+	}
+	if upd.CallbackQuery != nil {
+		b.handleCallback(upd.CallbackQuery)
+		return
+	}
+	if upd.InlineQuery != nil {
+		b.handleInlineQuery(upd.InlineQuery)
+	}
+}
+
+func (b *TelegramBot) dispatchUpdateSafely(upd Update) {
+	scope := fmt.Sprintf("telegram update handler update_id=%d", upd.UpdateID)
+	runWithRecovery(scope, func(_ error) {
+		chatID, replyToID := updateReplyContext(upd)
+		if chatID != 0 {
+			_ = b.sendMessageWithReply(chatID, "任务异常已记录，已自动跳过并继续后续任务。", nil, replyToID)
+		}
+	}, func() {
+		b.dispatchUpdate(upd)
+	})
 }
 
 func (b *TelegramBot) dropPendingUpdatesOnStart() error {
@@ -3533,6 +3610,9 @@ func (b *TelegramBot) startDownloadWorker() {
 	for i := 0; i < downloadWorkerPoolSize; i++ {
 		go func() {
 			for req := range b.downloadQueue {
+				if req == nil {
+					continue
+				}
 				func() {
 					b.queueMu.Lock()
 					for b.activeWorkers >= b.workerLimit {
@@ -3540,6 +3620,28 @@ func (b *TelegramBot) startDownloadWorker() {
 					}
 					b.activeWorkers++
 					b.queueMu.Unlock()
+
+					defer func() {
+						if rec := recover(); rec != nil {
+							reqID := ""
+							mediaType := ""
+							mediaID := ""
+							chatID := int64(0)
+							replyToID := 0
+							if req != nil {
+								reqID = strings.TrimSpace(req.requestID)
+								mediaType = req.mediaType
+								mediaID = req.mediaID
+								chatID = req.chatID
+								replyToID = req.replyToID
+							}
+							scope := fmt.Sprintf("telegram download worker request=%s media=%s:%s", reqID, mediaType, mediaID)
+							_ = logRecoveredPanic(scope, rec)
+							if chatID != 0 {
+								_ = b.sendMessageWithReply(chatID, "任务发生异常，已自动跳过并继续后续任务。", nil, replyToID)
+							}
+						}
+					}()
 
 					defer func() {
 						if strings.TrimSpace(req.requestID) != "" {
@@ -6392,11 +6494,26 @@ func (b *TelegramBot) trySendCachedMusicVideo(chatID int64, replyToID int, mvID 
 }
 
 func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession) error, single bool, replyToID int, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string) {
+	var status *DownloadStatus
+	defer func() {
+		if rec := recover(); rec != nil {
+			scope := fmt.Sprintf("telegram runDownload chat=%d media=%s:%s", chatID, mediaType, mediaID)
+			_ = logRecoveredPanic(scope, rec)
+			if status != nil {
+				status.UpdateSync("任务异常已记录，已自动跳过当前任务。", 0, 0)
+				status.Stop()
+				return
+			}
+			_ = b.sendMessageWithReply(chatID, "任务异常已记录，已自动跳过当前任务。", nil, replyToID)
+		}
+	}()
+
 	settings = normalizeChatSettings(settings)
 	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
 	format := settings.Format
 
-	status, err := newDownloadStatus(b, chatID, replyToID)
+	var err error
+	status, err = newDownloadStatus(b, chatID, replyToID)
 	if err != nil {
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
 		return
@@ -6925,25 +7042,27 @@ func newUploadWatchdog(timeout time.Duration) (context.Context, func(), func(), 
 	}
 
 	go func() {
-		ticker := time.NewTicker(uploadWatchdogInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-doneCh:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				mu.Lock()
-				idle := time.Since(lastProgress)
-				mu.Unlock()
-				if idle > timeout {
-					stalled.Store(true)
-					cancel()
+		runWithRecovery("telegram upload watchdog", nil, func() {
+			ticker := time.NewTicker(uploadWatchdogInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-doneCh:
 					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					mu.Lock()
+					idle := time.Since(lastProgress)
+					mu.Unlock()
+					if idle > timeout {
+						stalled.Store(true)
+						cancel()
+						return
+					}
 				}
 			}
-		}
+		})
 	}()
 
 	return ctx, touch, stop, stalled.Load
@@ -7240,6 +7359,13 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	req.Header.Set("Content-Type", contentType)
 	go func() {
 		defer stopWatchdog()
+		defer func() {
+			if rec := recover(); rec != nil {
+				panicErr := logRecoveredPanic("telegram sendAudio multipart writer", rec)
+				_ = pw.CloseWithError(panicErr)
+				writeErrCh <- panicErr
+			}
+		}()
 		err := func() error {
 			if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
 				return err
@@ -7383,6 +7509,13 @@ func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayNam
 	req.Header.Set("Content-Type", contentType)
 	go func() {
 		defer stopWatchdog()
+		defer func() {
+			if rec := recover(); rec != nil {
+				panicErr := logRecoveredPanic("telegram sendDocument multipart writer", rec)
+				_ = pw.CloseWithError(panicErr)
+				writeErrCh <- panicErr
+			}
+		}()
 		err := func() error {
 			if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
 				return err
@@ -7527,6 +7660,13 @@ func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int
 	req.Header.Set("Content-Type", contentType)
 	go func() {
 		defer stopWatchdog()
+		defer func() {
+			if rec := recover(); rec != nil {
+				panicErr := logRecoveredPanic("telegram sendVideo multipart writer", rec)
+				_ = pw.CloseWithError(panicErr)
+				writeErrCh <- panicErr
+			}
+		}()
 		err := func() error {
 			if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
 				return err
@@ -7679,7 +7819,11 @@ func newDownloadStatus(bot *TelegramBot, chatID int64, replyToID int) (*Download
 		updateCh:  make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 	}
-	go status.loop()
+	go func() {
+		runWithRecovery("telegram download status loop", nil, func() {
+			status.loop()
+		})
+	}()
 	return status, nil
 }
 

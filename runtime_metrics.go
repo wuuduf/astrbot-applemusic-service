@@ -129,16 +129,20 @@ func (b *TelegramBot) startMetricsReporter() {
 	b.metricsWG.Add(1)
 	go func() {
 		defer b.metricsWG.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				b.reportMetricsOnce()
-			case <-stopCh:
-				return
+		runWithRecovery("telegram metrics reporter", nil, func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					runWithRecovery("telegram metrics tick", nil, func() {
+						b.reportMetricsOnce()
+					})
+				case <-stopCh:
+					return
+				}
 			}
-		}
+		})
 	}()
 }
 

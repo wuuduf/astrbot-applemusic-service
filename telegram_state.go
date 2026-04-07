@@ -68,14 +68,18 @@ func (b *TelegramBot) startStateSaver() {
 	b.stateWG.Add(1)
 	go func() {
 		defer b.stateWG.Done()
-		for {
-			select {
-			case <-saveCh:
-				_ = b.saveRuntimeStateNow()
-			case <-stopCh:
-				return
+		runWithRecovery("telegram state saver", nil, func() {
+			for {
+				select {
+				case <-saveCh:
+					runWithRecovery("telegram saveRuntimeStateNow", nil, func() {
+						_ = b.saveRuntimeStateNow()
+					})
+				case <-stopCh:
+					return
+				}
 			}
-		}
+		})
 	}()
 }
 

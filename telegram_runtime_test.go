@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,6 +199,84 @@ func TestRunExternalCommandTimeoutMetrics(t *testing.T) {
 	if after <= before {
 		t.Fatalf("expected external timeout metrics to increase")
 	}
+}
+
+func TestRunWithRecoveryRecoversPanic(t *testing.T) {
+	var callbackErr error
+	panicked := runWithRecovery("test panic", func(err error) {
+		callbackErr = err
+	}, func() {
+		panic("boom")
+	})
+	if !panicked {
+		t.Fatalf("expected panic to be recovered")
+	}
+	if callbackErr == nil {
+		t.Fatalf("expected panic callback error")
+	}
+	if !strings.Contains(callbackErr.Error(), "test panic panic: boom") {
+		t.Fatalf("unexpected callback error: %v", callbackErr)
+	}
+}
+
+func TestDownloadWorkerContinuesAfterTaskPanic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/sendMessage"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer server.Close()
+
+	b := &TelegramBot{
+		token:             "test",
+		apiBase:           server.URL,
+		client:            server.Client(),
+		pollClient:        server.Client(),
+		downloadQueue:     make(chan *downloadRequest, 4),
+		workerLimit:       1,
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	b.startDownloadWorker()
+
+	done := make(chan struct{})
+	b.downloadQueue <- &downloadRequest{
+		chatID:    1,
+		replyToID: 11,
+		requestID: "panic-task",
+		mediaType: mediaTypeSong,
+		mediaID:   "song-panic",
+		single:    true,
+		settings:  normalizeChatSettings(ChatDownloadSettings{}),
+		fn: func(session *DownloadSession) error {
+			panic("task panic")
+		},
+	}
+	b.downloadQueue <- &downloadRequest{
+		chatID:    1,
+		replyToID: 12,
+		requestID: "next-task",
+		mediaType: mediaTypeSong,
+		mediaID:   "song-next",
+		single:    true,
+		settings:  normalizeChatSettings(ChatDownloadSettings{}),
+		fn: func(session *DownloadSession) error {
+			close(done)
+			return nil
+		},
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("second task did not run after first task panic")
+	}
+	close(b.downloadQueue)
 }
 
 func jsonMarshalIndentForTest(v any) ([]byte, error) {

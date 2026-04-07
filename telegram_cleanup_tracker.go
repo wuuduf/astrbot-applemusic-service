@@ -87,16 +87,20 @@ func (t *telegramCleanupTracker) start() {
 
 	go func() {
 		defer t.wg.Done()
-		ticker := time.NewTicker(t.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				t.cleanupOnce(false)
-			case <-stop:
-				return
+		runWithRecovery("telegram cleanup tracker", nil, func() {
+			ticker := time.NewTicker(t.interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					runWithRecovery("telegram cleanup tick", nil, func() {
+						t.cleanupOnce(false)
+					})
+				case <-stop:
+					return
+				}
 			}
-		}
+		})
 	}()
 }
 

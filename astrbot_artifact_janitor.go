@@ -72,16 +72,20 @@ func (s *astrbotAPIService) startArtifactJanitor() {
 
 	go func() {
 		defer s.artifactJanitorWG.Done()
-		ticker := time.NewTicker(s.janitorInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s.cleanupArtifactsNow()
-			case <-stop:
-				return
+		runWithRecovery("astrbot artifact janitor", nil, func() {
+			ticker := time.NewTicker(s.janitorInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					runWithRecovery("astrbot artifact janitor tick", nil, func() {
+						s.cleanupArtifactsNow()
+					})
+				case <-stop:
+					return
+				}
 			}
-		}
+		})
 	}()
 }
 

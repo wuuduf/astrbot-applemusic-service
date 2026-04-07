@@ -123,16 +123,20 @@ func (g *telegramResourceGuard) start() {
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
-		ticker := time.NewTicker(g.checkInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				g.evaluate()
-			case <-g.stopCh:
-				return
+		runWithRecovery("telegram resource guard", nil, func() {
+			ticker := time.NewTicker(g.checkInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					runWithRecovery("telegram resource guard tick", nil, func() {
+						g.evaluate()
+					})
+				case <-g.stopCh:
+					return
+				}
 			}
-		}
+		})
 	}()
 }
 
