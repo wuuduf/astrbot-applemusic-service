@@ -231,3 +231,54 @@ func TestHasSongAutoExtras(t *testing.T) {
 		t.Fatalf("expected true when AutoAnimated enabled")
 	}
 }
+
+func TestAcquireReleaseInflightDownload(t *testing.T) {
+	b := &TelegramBot{
+		inflightDownloads: make(map[string]struct{}),
+	}
+	key := "chat|song|123"
+	if !b.acquireInflightDownload(key) {
+		t.Fatalf("expected first acquire success")
+	}
+	if b.acquireInflightDownload(key) {
+		t.Fatalf("expected second acquire to be blocked")
+	}
+	b.releaseInflightDownload(key)
+	if !b.acquireInflightDownload(key) {
+		t.Fatalf("expected acquire after release to succeed")
+	}
+}
+
+func TestMakeDownloadInflightKeyIncludesSettings(t *testing.T) {
+	base := ChatDownloadSettings{
+		Format:         telegramFormatAlac,
+		AACType:        "aac",
+		MVAudioType:    "atmos",
+		LyricsFormat:   "lrc",
+		AutoLyrics:     false,
+		AutoCover:      false,
+		AutoAnimated:   false,
+		SettingsInited: true,
+	}
+	keyA := makeDownloadInflightKey(100, mediaTypeSong, "123", "us", transferModeOneByOne, base)
+	base.AutoLyrics = true
+	keyB := makeDownloadInflightKey(100, mediaTypeSong, "123", "us", transferModeOneByOne, base)
+	if keyA == keyB {
+		t.Fatalf("expected different keys when settings differ")
+	}
+}
+
+func TestTelegramSendLimiterNextWait(t *testing.T) {
+	limiter := newTelegramSendLimiter(2*time.Second, 4*time.Second)
+	if limiter == nil {
+		t.Fatalf("expected limiter")
+	}
+	now := time.Unix(1000, 0)
+	limiter.lastAll = now.Add(-1 * time.Second)
+	limiter.lastChat[42] = now.Add(-500 * time.Millisecond)
+	wait := limiter.nextWaitLocked(now, 42)
+	expected := 3500 * time.Millisecond
+	if wait != expected {
+		t.Fatalf("wait mismatch: got %s want %s", wait, expected)
+	}
+}

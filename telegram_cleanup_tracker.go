@@ -26,6 +26,7 @@ type telegramCleanupTracker struct {
 	nowFn      func() time.Time
 	scanFolder func(root string, cacheFile string) (int64, []downloadFileEntry, error)
 	removeFile func(path string) error
+	onDelete   func(path string, size int64)
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -183,11 +184,17 @@ func (t *telegramCleanupTracker) cleanupOnce(forceScan bool) {
 			if os.IsNotExist(err) {
 				t.total -= entry.size
 				delete(t.files, entry.path)
+				if t.onDelete != nil {
+					t.onDelete(entry.path, entry.size)
+				}
 			}
 			continue
 		}
 		t.total -= entry.size
 		delete(t.files, entry.path)
+		if t.onDelete != nil {
+			t.onDelete(entry.path, entry.size)
+		}
 	}
 	if t.total < 0 {
 		t.total = 0

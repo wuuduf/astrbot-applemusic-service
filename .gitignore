@@ -21,6 +21,10 @@
 !astrbot_artifact_janitor_test.go
 !telegram_cleanup_tracker.go
 !telegram_cleanup_tracker_test.go
+!runtime_metrics.go
+!telegram_resource_guard.go
+!telegram_state.go
+!telegram_runtime_test.go
 !zip_test.go
 !README.md
 !README-CN.md

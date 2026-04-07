@@ -144,6 +144,7 @@ docker run --rm -it \
 - song/album/playlist/station 的 ZIP 会缓存 Telegram `file_id`，重复请求可秒传。
 - MV 支持优先 `video` 发送、失败回退 `document`，并支持 Telegram `file_id` 缓存复用。
 - ZIP 超过 Telegram 限制时会自动回退为逐个发送。
+- 同一 chat 下“同参数任务”在进行中会自动去重，不会重复下载/上传。
 - Telegram 下载目录改为后台 janitor 清理（不再每个任务结束就全量扫描目录）。
 - 配额仍由 `telegram-download-max-gb` 控制（默认 `3` GB，Telegram cache 文件会被排除）。
 - janitor 节奏和保护窗口：
@@ -152,6 +153,18 @@ docker run --rm -it \
   - `telegram-cleanup-protect-sec`（默认 `120`，保护刚生成的新文件）
 - 若设置了 `AMDL_TMPDIR`/`TMPDIR`（且不是 `/tmp`、`/var/tmp`），该目录也会纳入 janitor 清理根目录。
 - ZIP 临时文件会优先写入下载目录（失败才回退系统临时目录）。可通过 `AMDL_TMPDIR=/path/to/dir` 强制指定临时目录。
+- 运行时状态会落盘到 `telegram-state-file`（默认 `<telegram-cache-file 基名>.state.json`），包含 pending 面板、队列/进行中任务、chat 设置。
+- Bot 重启后会自动恢复未完成的队列/进行中任务。
+- 全局发送节流默认：全局 `150ms` + 单 chat `800ms`。可通过环境变量覆盖：
+  - `AMDL_TELEGRAM_SEND_GLOBAL_INTERVAL_MS`
+  - `AMDL_TELEGRAM_SEND_CHAT_INTERVAL_MS`
+- 收到 Telegram `retry_after` 后会触发全局背压闸门，所有上传统一等待冷却窗口。
+- 资源保护阈值（触发后拒绝新任务并明确提示）：
+  - `telegram-min-free-disk-mb`（默认 `512`）
+  - `telegram-min-free-tmp-mb`（默认 `256`）
+  - `telegram-max-memory-mb`（默认 `0`，表示关闭）
+  - `telegram-resource-check-interval-sec`（默认 `30`）
+- 可观测性日志间隔：`telegram-metrics-interval-sec`（默认 `60`），输出队列深度、活跃 worker、上传失败率、retry_after 命中、外部命令超时、清理删除量。
 - Apple API/下载链路的 HTTP 请求默认超时为 `45s`，可通过 `AMDL_HTTP_TIMEOUT_SEC` 调整（最小 `5`）。
 - `runv2` 下载流默认空闲超时为 `300s`，可通过 `AMDL_RUNV2_IDLE_TIMEOUT_SEC` 调整（设为 `0` 可关闭空闲超时）。
 - 超过限制的文件会在 FLAC 模式下重新压缩到 `telegram-max-file-mb`（音质可能下降）。

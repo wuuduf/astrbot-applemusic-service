@@ -73,6 +73,8 @@ export ASTRBOT_API_TOKEN='replace-with-a-strong-token'
 curl http://127.0.0.1:27198/healthz
 ```
 
+`/healthz` 现在会附带基础运行指标（上传成功/失败、retry_after 命中、外部命令超时、清理删除计数），便于做可观测性接入。
+
 ## API 列表
 
 - `POST /v1/search`

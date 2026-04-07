@@ -53,11 +53,17 @@ type ConfigSet struct {
 	TelegramMaxFileMB                 int     `yaml:"telegram-max-file-mb"`
 	TelegramDownloadFolder            string  `yaml:"telegram-download-folder"`
 	TelegramCacheFile                 string  `yaml:"telegram-cache-file"`
+	TelegramStateFile                 string  `yaml:"telegram-state-file"`
 	TelegramAPIURL                    string  `yaml:"telegram-api-url"`
 	TelegramHTTPTimeoutSec            int     `yaml:"telegram-http-timeout-sec"`
 	TelegramPollTimeoutSec            int     `yaml:"telegram-poll-timeout-sec"`
 	TelegramProxyURL                  string  `yaml:"telegram-proxy-url"`
 	TelegramNoProxy                   bool    `yaml:"telegram-no-proxy"`
+	TelegramMetricsIntervalSec        int     `yaml:"telegram-metrics-interval-sec"`
+	TelegramResourceCheckIntervalSec  int     `yaml:"telegram-resource-check-interval-sec"`
+	TelegramMinFreeDiskMB             int     `yaml:"telegram-min-free-disk-mb"`
+	TelegramMinFreeTmpMB              int     `yaml:"telegram-min-free-tmp-mb"`
+	TelegramMaxMemoryMB               int     `yaml:"telegram-max-memory-mb"`
 	TelegramDownloadMaxGB             int     `yaml:"telegram-download-max-gb"`
 	TelegramCleanupIntervalSec        int     `yaml:"telegram-cleanup-interval-sec"`
 	TelegramCleanupScanIntervalSec    int     `yaml:"telegram-cleanup-scan-interval-sec"`

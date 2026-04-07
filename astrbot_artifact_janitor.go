@@ -117,6 +117,7 @@ func (s *astrbotAPIService) cleanupArtifactsAt(now time.Time) artifactCleanupSta
 		if s.maxAge > 0 && now.Sub(entry.modTime) > s.maxAge {
 			if err := os.RemoveAll(entry.path); err == nil {
 				stats.RemovedByAge++
+				appRuntimeMetrics.recordCleanupRemoval(entry.size)
 				continue
 			}
 		}
@@ -162,6 +163,7 @@ func (s *astrbotAPIService) cleanupArtifactsAt(now time.Time) artifactCleanupSta
 		}
 		total -= entry.size
 		stats.RemovedByQuota++
+		appRuntimeMetrics.recordCleanupRemoval(entry.size)
 	}
 	stats.TotalBytes = total
 	return stats

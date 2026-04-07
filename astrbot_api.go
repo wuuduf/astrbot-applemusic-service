@@ -470,12 +470,20 @@ func (s *astrbotAPIService) handleHealth(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusMethodNotAllowed, astrbotErrorResponse{Error: "method not allowed"})
 		return
 	}
+	metrics := appRuntimeMetrics.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"service":       "apple-music-downloader-bot",
 		"mode":          "astrbot-api",
 		"auth_required": strings.TrimSpace(s.apiToken) != "",
 		"timestamp":     time.Now(),
+		"metrics": map[string]any{
+			"uploads_success":       metrics.UploadSuccesses,
+			"uploads_failure":       metrics.UploadFailures,
+			"telegram_retry_after":  metrics.TelegramRetryAfter,
+			"external_cmd_timeout":  metrics.ExternalCmdTimeouts,
+			"cleanup_deleted_files": metrics.CleanupDeletedFiles,
+		},
 	})
 }
 
@@ -796,6 +804,9 @@ func (s *astrbotAPIService) handleArtworkAnimated(ctx context.Context, w http.Re
 	defer os.Remove(tmpPath)
 	result, err := cmdrunner.RunWithOptions(ctx, "ffmpeg", []string{"-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath}, cmdrunner.RunOptions{})
 	if err != nil {
+		if cmdrunner.IsTimeout(err) {
+			appRuntimeMetrics.recordExternalCommandTimeout()
+		}
 		errMsg := strings.TrimSpace(result.Combined)
 		if errMsg == "" {
 			errMsg = err.Error()

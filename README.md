@@ -185,6 +185,7 @@ Notes:
 - ZIP results are cached via Telegram `file_id` for song/album/playlist/station.
 - MV supports send-as-video, fallback-to-document, and Telegram `file_id` cache re-send.
 - If ZIP is too large for Telegram, the bot falls back to one-by-one transfer automatically.
+- Repeated same-task requests in one chat are deduplicated while in-flight (prevents duplicate downloads/uploads).
 - Telegram download cleanup is handled by a background janitor (no per-download full directory scan).
 - Quota is still controlled by `telegram-download-max-gb` (default `3` GB, Telegram cache file is excluded).
 - Janitor cadence and safety window:
@@ -193,6 +194,18 @@ Notes:
   - `telegram-cleanup-protect-sec` (default `120`, protects very new files from deletion)
 - If `AMDL_TMPDIR`/`TMPDIR` is set (and not `/tmp` or `/var/tmp`), that directory is included in janitor roots.
 - ZIP temp files prefer download directories first (fallback to system temp). You can force temp directory via `AMDL_TMPDIR=/path/to/dir`.
+- Runtime state (pending selection panel + queued/in-flight tasks + chat settings) is snapshotted to `telegram-state-file` (default: `<telegram-cache-file basename>.state.json`).
+- On bot restart, queued/in-flight tasks are recovered from the runtime state snapshot.
+- Global send pacing defaults: `150ms` global + `800ms` per chat. Override via:
+  - `AMDL_TELEGRAM_SEND_GLOBAL_INTERVAL_MS`
+  - `AMDL_TELEGRAM_SEND_CHAT_INTERVAL_MS`
+- `retry_after` responses now activate a global backpressure gate (all uploads wait for the advised cooldown window).
+- Resource guard blocks new tasks under pressure (with clear reply message):
+  - `telegram-min-free-disk-mb` (default `512`)
+  - `telegram-min-free-tmp-mb` (default `256`)
+  - `telegram-max-memory-mb` (default `0` = disabled)
+  - `telegram-resource-check-interval-sec` (default `30`)
+- Periodic observability log interval: `telegram-metrics-interval-sec` (default `60`), including queue depth, active workers, upload failure rate, retry_after hits, command timeouts, and cleanup deletions.
 - Apple API/downloader outbound HTTP timeout defaults to `45s`; tune it with `AMDL_HTTP_TIMEOUT_SEC` (minimum `5`).
 - `runv2` stream idle timeout defaults to `300s`; tune with `AMDL_RUNV2_IDLE_TIMEOUT_SEC` (`0` disables idle timeout).
 - Large files are re-encoded to fit `telegram-max-file-mb` in FLAC mode (quality may be reduced).

@@ -2720,6 +2720,13 @@ const (
 	defaultTelegramCleanupProtectAge   = 2 * time.Minute
 	defaultTelegramHTTPTimeout         = 180 * time.Second
 	defaultTelegramPollTimeout         = 75 * time.Second
+	defaultTelegramStateFile           = "telegram-state.json"
+	defaultTelegramMetricsInterval     = 60 * time.Second
+	defaultTelegramResourceCheck       = 30 * time.Second
+	defaultTelegramMinFreeDiskMB       = 512
+	defaultTelegramMinFreeTmpMB        = 256
+	defaultTelegramSendGlobalInterval  = 150 * time.Millisecond
+	defaultTelegramSendChatInterval    = 800 * time.Millisecond
 	minTelegramPollTimeout             = 35 * time.Second
 	telegramDialTimeout                = 20 * time.Second
 	telegramTLSHandshakeTimeout        = 30 * time.Second
@@ -2833,6 +2840,25 @@ type TelegramBot struct {
 	docCache   map[string]CachedDocument
 	videoCache map[string]CachedVideo
 
+	inflightMu        sync.Mutex
+	inflightDownloads map[string]struct{}
+	sendLimiter       *telegramSendLimiter
+
+	requestStateMu sync.Mutex
+	activeRequests map[string]telegramPersistedRequest
+	requestSeq     atomic.Uint64
+
+	stateFile string
+	stateMu   sync.Mutex
+	stateSave chan struct{}
+	stateStop chan struct{}
+	stateWG   sync.WaitGroup
+
+	metricsStop chan struct{}
+	metricsWG   sync.WaitGroup
+
+	resourceGuard *telegramResourceGuard
+
 	cleanupTracker *telegramCleanupTracker
 }
 
@@ -2876,6 +2902,9 @@ type downloadRequest struct {
 	transferMode string
 	mediaType    string
 	mediaID      string
+	storefront   string
+	inflightKey  string
+	requestID    string
 	fn           func(session *DownloadSession) error
 }
 
@@ -3051,6 +3080,11 @@ func runTelegramBot(appleToken string) {
 		if bot.cleanupTracker != nil {
 			bot.cleanupTracker.stop()
 		}
+		if bot.resourceGuard != nil {
+			bot.resourceGuard.stop()
+		}
+		bot.stopMetricsReporter()
+		bot.stopStateSaver()
 	}()
 	fmt.Println("Telegram bot started. Waiting for updates...")
 	fmt.Printf("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)\n", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
@@ -3143,6 +3177,142 @@ func telegramDownloadMaxBytes() int64 {
 	return int64(gb) * 1024 * 1024 * 1024
 }
 
+type telegramSendLimiter struct {
+	globalInterval time.Duration
+	chatInterval   time.Duration
+
+	mu           sync.Mutex
+	lastAll      time.Time
+	lastChat     map[int64]time.Time
+	blockedUntil time.Time
+	nowFn        func() time.Time
+}
+
+func newTelegramSendLimiter(globalInterval time.Duration, chatInterval time.Duration) *telegramSendLimiter {
+	if globalInterval < 0 {
+		globalInterval = 0
+	}
+	if chatInterval < 0 {
+		chatInterval = 0
+	}
+	if globalInterval == 0 && chatInterval == 0 {
+		return nil
+	}
+	return &telegramSendLimiter{
+		globalInterval: globalInterval,
+		chatInterval:   chatInterval,
+		lastChat:       make(map[int64]time.Time),
+		nowFn:          time.Now,
+	}
+}
+
+func (l *telegramSendLimiter) wait(ctx context.Context, chatID int64) error {
+	if l == nil {
+		return nil
+	}
+	for {
+		wait := l.reserve(chatID)
+		if wait <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (l *telegramSendLimiter) reserve(chatID int64) time.Duration {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.nowFn()
+	wait := l.nextWaitLocked(now, chatID)
+	if wait <= 0 {
+		if l.globalInterval > 0 {
+			l.lastAll = now
+		}
+		if chatID != 0 && l.chatInterval > 0 {
+			l.lastChat[chatID] = now
+		}
+	}
+	return wait
+}
+
+func (l *telegramSendLimiter) nextWait(chatID int64) time.Duration {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.nextWaitLocked(l.nowFn(), chatID)
+}
+
+func (l *telegramSendLimiter) nextWaitLocked(now time.Time, chatID int64) time.Duration {
+	wait := time.Duration(0)
+	if !l.blockedUntil.IsZero() {
+		if remain := l.blockedUntil.Sub(now); remain > wait {
+			wait = remain
+		}
+	}
+	if l.globalInterval > 0 && !l.lastAll.IsZero() {
+		if remain := l.globalInterval - now.Sub(l.lastAll); remain > wait {
+			wait = remain
+		}
+	}
+	if chatID != 0 && l.chatInterval > 0 {
+		if last, ok := l.lastChat[chatID]; ok && !last.IsZero() {
+			if remain := l.chatInterval - now.Sub(last); remain > wait {
+				wait = remain
+			}
+		}
+	}
+	return wait
+}
+
+func (l *telegramSendLimiter) blockFor(duration time.Duration) {
+	if l == nil || duration <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	until := l.nowFn().Add(duration)
+	if until.After(l.blockedUntil) {
+		l.blockedUntil = until
+	}
+}
+
+func parsePositiveIntEnv(name string) (int, bool) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+func telegramSendGlobalInterval() time.Duration {
+	if ms, ok := parsePositiveIntEnv("AMDL_TELEGRAM_SEND_GLOBAL_INTERVAL_MS"); ok {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return defaultTelegramSendGlobalInterval
+}
+
+func telegramSendChatInterval() time.Duration {
+	if ms, ok := parsePositiveIntEnv("AMDL_TELEGRAM_SEND_CHAT_INTERVAL_MS"); ok {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return defaultTelegramSendChatInterval
+}
+
 func newTelegramBot(token, appleToken string) *TelegramBot {
 	allowed := make(map[int64]bool)
 	for _, id := range Config.TelegramAllowedChatIDs {
@@ -3195,13 +3365,24 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		downloadQueue:      make(chan *downloadRequest, queueSize),
 		workerLimit:        defaultTaskWorkerLimit,
 		cacheFile:          cacheFile,
+		stateFile:          resolveTelegramStateFile(cacheFile),
 		cache:              make(map[string]CachedAudio),
 		docCache:           make(map[string]CachedDocument),
 		videoCache:         make(map[string]CachedVideo),
+		inflightDownloads:  make(map[string]struct{}),
+		activeRequests:     make(map[string]telegramPersistedRequest),
+		sendLimiter:        newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
 	}
 	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.loadCache()
+	bot.startStateSaver()
 	bot.startDownloadWorker()
+	bot.restoreRuntimeState()
+	bot.startMetricsReporter()
+	bot.resourceGuard = newTelegramResourceGuard(telegramCleanupRoots())
+	if bot.resourceGuard != nil {
+		bot.resourceGuard.start()
+	}
 	bot.cleanupTracker = newTelegramCleanupTracker(
 		telegramCleanupRoots(),
 		cacheFile,
@@ -3210,7 +3391,11 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		telegramCleanupScanInterval(),
 		telegramCleanupProtectAge(),
 	)
+	bot.cleanupTracker.onDelete = func(path string, size int64) {
+		appRuntimeMetrics.recordCleanupRemoval(size)
+	}
 	bot.cleanupTracker.start()
+	bot.requestStateSave()
 	return bot
 }
 
@@ -3313,21 +3498,34 @@ func (b *TelegramBot) startDownloadWorker() {
 	for i := 0; i < downloadWorkerPoolSize; i++ {
 		go func() {
 			for req := range b.downloadQueue {
-				b.queueMu.Lock()
-				for b.activeWorkers >= b.workerLimit {
-					b.queueCond.Wait()
-				}
-				b.activeWorkers++
-				b.queueMu.Unlock()
+				func() {
+					b.queueMu.Lock()
+					for b.activeWorkers >= b.workerLimit {
+						b.queueCond.Wait()
+					}
+					b.activeWorkers++
+					b.queueMu.Unlock()
 
-				b.runDownload(req.chatID, req.fn, req.single, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
+					defer func() {
+						if strings.TrimSpace(req.requestID) != "" {
+							b.untrackRequest(req.requestID)
+						}
+						if strings.TrimSpace(req.inflightKey) != "" {
+							b.releaseInflightDownload(req.inflightKey)
+						}
+						b.queueMu.Lock()
+						if b.activeWorkers > 0 {
+							b.activeWorkers--
+						}
+						b.queueCond.Broadcast()
+						b.queueMu.Unlock()
+					}()
 
-				b.queueMu.Lock()
-				if b.activeWorkers > 0 {
-					b.activeWorkers--
-				}
-				b.queueCond.Broadcast()
-				b.queueMu.Unlock()
+					if strings.TrimSpace(req.requestID) != "" {
+						b.markRequestRunning(req.requestID)
+					}
+					b.runDownload(req.chatID, req.fn, req.single, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
+				}()
 			}
 		}()
 	}
@@ -3492,13 +3690,14 @@ func (b *TelegramBot) getChatSettings(chatID int64) ChatDownloadSettings {
 
 func (b *TelegramBot) updateChatSettings(chatID int64, updateFn func(current ChatDownloadSettings) ChatDownloadSettings) ChatDownloadSettings {
 	b.settingsMu.Lock()
-	defer b.settingsMu.Unlock()
 	if b.chatSettings == nil {
 		b.chatSettings = make(map[int64]ChatDownloadSettings)
 	}
 	current := normalizeChatSettings(b.chatSettings[chatID])
 	updated := normalizeChatSettings(updateFn(current))
 	b.chatSettings[chatID] = updated
+	b.settingsMu.Unlock()
+	b.requestStateSave()
 	return updated
 }
 
@@ -4641,11 +4840,19 @@ func firstGenreName(op string, genres []string) (string, error) {
 }
 
 func runExternalCommand(ctx context.Context, name string, args ...string) (cmdrunner.Result, error) {
-	return cmdrunner.RunWithOptions(ctx, name, args, cmdrunner.RunOptions{})
+	result, err := cmdrunner.RunWithOptions(ctx, name, args, cmdrunner.RunOptions{})
+	if cmdrunner.IsTimeout(err) {
+		appRuntimeMetrics.recordExternalCommandTimeout()
+	}
+	return result, err
 }
 
 func runExternalCommandInDir(ctx context.Context, dir string, name string, args ...string) (cmdrunner.Result, error) {
-	return cmdrunner.RunWithOptions(ctx, name, args, cmdrunner.RunOptions{Dir: dir})
+	result, err := cmdrunner.RunWithOptions(ctx, name, args, cmdrunner.RunOptions{Dir: dir})
+	if cmdrunner.IsTimeout(err) {
+		appRuntimeMetrics.recordExternalCommandTimeout()
+	}
+	return result, err
 }
 
 func (b *TelegramBot) fetchArtistProfile(storefront string, artistID string) (string, string, error) {
@@ -5665,6 +5872,89 @@ func (b *TelegramBot) handlePage(chatID int64, messageID int, delta int) {
 	b.setPending(chatID, pending.Kind, pending.Query, pending.Storefront, newOffset, items, hasNext, pending.ReplyToMessageID, messageID, pending.Title)
 }
 
+func makeDownloadInflightKey(chatID int64, mediaType string, mediaID string, storefront string, transferMode string, settings ChatDownloadSettings) string {
+	normalized := normalizeChatSettings(settings)
+	normalizedTransfer := normalizeTransferModeForMedia(transferMode, mediaType, mediaType == mediaTypeSong || mediaType == mediaTypeMusicVideo)
+	return strings.Join([]string{
+		strconv.FormatInt(chatID, 10),
+		strings.ToLower(strings.TrimSpace(mediaType)),
+		strings.TrimSpace(mediaID),
+		strings.TrimSpace(storefront),
+		normalizedTransfer,
+		normalized.Format,
+		normalized.AACType,
+		normalized.MVAudioType,
+		strconv.FormatBool(normalized.SongZip),
+		strconv.FormatBool(normalized.AutoLyrics),
+		strconv.FormatBool(normalized.AutoCover),
+		strconv.FormatBool(normalized.AutoAnimated),
+		normalized.LyricsFormat,
+	}, "|")
+}
+
+func (b *TelegramBot) acquireInflightDownload(key string) bool {
+	if b == nil {
+		return false
+	}
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return true
+	}
+	b.inflightMu.Lock()
+	defer b.inflightMu.Unlock()
+	if _, exists := b.inflightDownloads[trimmed]; exists {
+		return false
+	}
+	b.inflightDownloads[trimmed] = struct{}{}
+	b.requestStateSave()
+	return true
+}
+
+func (b *TelegramBot) releaseInflightDownload(key string) {
+	if b == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return
+	}
+	b.inflightMu.Lock()
+	delete(b.inflightDownloads, trimmed)
+	b.inflightMu.Unlock()
+	b.requestStateSave()
+}
+
+func (b *TelegramBot) waitTelegramSend(ctx context.Context, chatID int64) error {
+	if b == nil || b.sendLimiter == nil {
+		return nil
+	}
+	return b.sendLimiter.wait(ctx, chatID)
+}
+
+func (b *TelegramBot) applyTelegramRetryAfter(duration time.Duration) {
+	if b == nil || duration <= 0 {
+		return
+	}
+	if b.sendLimiter != nil {
+		b.sendLimiter.blockFor(duration)
+	}
+	appRuntimeMetrics.recordTelegramRetryAfter()
+}
+
+func (b *TelegramBot) noteTelegramRateLimit(err error) {
+	if err == nil {
+		return
+	}
+	retryAfter, ok := parseTelegramRetryAfter(err)
+	if !ok {
+		return
+	}
+	if retryAfter < time.Second {
+		retryAfter = time.Second
+	}
+	b.applyTelegramRetryAfter(retryAfter)
+}
+
 func (b *TelegramBot) queueDownloadSong(chatID int64, songID string) {
 	b.queueDownloadSongWithStorefront(chatID, songID, Config.Storefront, 0)
 }
@@ -5706,9 +5996,16 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
-	b.enqueueDownload(chatID, replyToID, true, settings, transferMode, mediaTypeSong, songID, func(session *DownloadSession) error {
+	inflightKey := makeDownloadInflightKey(chatID, mediaTypeSong, songID, storefront, transferMode, settings)
+	if !b.acquireInflightDownload(inflightKey) {
+		_ = b.sendMessageWithReply(chatID, "Same song task is already running for this chat. Please wait.", nil, replyToID)
+		return
+	}
+	if queued := b.enqueueDownload(chatID, replyToID, true, settings, transferMode, mediaTypeSong, songID, storefront, inflightKey, func(session *DownloadSession) error {
 		return ripSong(session, songID, b.appleToken, storefront, session.Config.MediaUserToken)
-	})
+	}); !queued {
+		b.releaseInflightDownload(inflightKey)
+	}
 }
 
 func hasSongAutoExtras(settings ChatDownloadSettings) bool {
@@ -5886,9 +6183,16 @@ func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID s
 	if saveDir == "" {
 		saveDir = "AM-DL downloads"
 	}
-	b.enqueueDownload(chatID, replyToID, true, settings, transferModeOneByOne, mediaTypeMusicVideo, mvID, func(session *DownloadSession) error {
+	inflightKey := makeDownloadInflightKey(chatID, mediaTypeMusicVideo, mvID, storefront, transferModeOneByOne, settings)
+	if !b.acquireInflightDownload(inflightKey) {
+		_ = b.sendMessageWithReply(chatID, "Same MV task is already running for this chat. Please wait.", nil, replyToID)
+		return
+	}
+	if queued := b.enqueueDownload(chatID, replyToID, true, settings, transferModeOneByOne, mediaTypeMusicVideo, mvID, storefront, inflightKey, func(session *DownloadSession) error {
 		return mvDownloader(session, mvID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil)
-	})
+	}); !queued {
+		b.releaseInflightDownload(inflightKey)
+	}
 }
 
 func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaID string, storefront string, mediaName string, replyToID int) {
@@ -5921,27 +6225,49 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
+	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, false)
+	inflightKey := makeDownloadInflightKey(chatID, mediaType, mediaID, storefront, transferMode, settings)
+	if !b.acquireInflightDownload(inflightKey) {
+		_ = b.sendMessageWithReply(chatID, "Same download task is already running for this chat. Please wait.", nil, replyToID)
+		return
+	}
+	enqueueWithRollback := func(fn func(session *DownloadSession) error) {
+		if queued := b.enqueueDownload(chatID, replyToID, false, settings, transferMode, mediaType, mediaID, storefront, inflightKey, fn); !queued {
+			b.releaseInflightDownload(inflightKey)
+		}
+	}
 	switch mediaType {
 	case mediaTypeAlbum:
-		b.enqueueDownload(chatID, replyToID, false, settings, transferMode, mediaTypeAlbum, mediaID, func(session *DownloadSession) error {
+		enqueueWithRollback(func(session *DownloadSession) error {
 			return ripAlbum(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken, "")
 		})
 	case mediaTypePlaylist:
-		b.enqueueDownload(chatID, replyToID, false, settings, transferMode, mediaTypePlaylist, mediaID, func(session *DownloadSession) error {
+		enqueueWithRollback(func(session *DownloadSession) error {
 			return ripPlaylist(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
 		})
 	case mediaTypeStation:
-		b.enqueueDownload(chatID, replyToID, false, settings, transferMode, mediaTypeStation, mediaID, func(session *DownloadSession) error {
+		enqueueWithRollback(func(session *DownloadSession) error {
 			return ripStation(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
 		})
 	default:
+		b.releaseInflightDownload(inflightKey)
 		_ = b.sendMessageWithReply(chatID, "Unsupported collection type for transfer.", nil, replyToID)
 	}
 }
 
-func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, fn func(session *DownloadSession) error) {
+func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string, inflightKey string, fn func(session *DownloadSession) error) bool {
 	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
 	settings = normalizeChatSettings(settings)
+	if b.resourceGuard != nil {
+		if ok, reason := b.resourceGuard.allow(); !ok {
+			msg := "Resource pressure detected. New download tasks are temporarily blocked."
+			if strings.TrimSpace(reason) != "" {
+				msg = msg + " " + reason
+			}
+			_ = b.sendMessageWithReply(chatID, msg, nil, replyToID)
+			return false
+		}
+	}
 	req := &downloadRequest{
 		chatID:       chatID,
 		replyToID:    replyToID,
@@ -5950,6 +6276,9 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 		transferMode: transferMode,
 		mediaType:    mediaType,
 		mediaID:      mediaID,
+		storefront:   storefront,
+		inflightKey:  inflightKey,
+		requestID:    b.nextRequestID(),
 		fn:           fn,
 	}
 	b.queueMu.Lock()
@@ -5962,17 +6291,20 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 
 	if queueFull {
 		_ = b.sendMessageWithReply(chatID, "Download queue is full. Please try again later.", nil, replyToID)
-		return
+		return false
 	}
+	b.trackQueuedRequest(req)
 	select {
 	case b.downloadQueue <- req:
 	default:
+		b.untrackRequest(req.requestID)
 		_ = b.sendMessageWithReply(chatID, "Download queue is full. Please try again later.", nil, replyToID)
-		return
+		return false
 	}
 	if queueLen > 0 || activeWorkers >= workerLimit {
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", queueLen+1, activeWorkers, workerLimit), nil, replyToID)
 	}
+	return true
 }
 
 func (b *TelegramBot) trySendCachedTrack(chatID int64, replyToID int, trackID string, format string) bool {
@@ -6644,7 +6976,11 @@ func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAtt
 			return nil
 		}
 		retryAfter, hasRetryAfter := parseTelegramRetryAfter(lastErr)
+		if hasRetryAfter {
+			b.applyTelegramRetryAfter(retryAfter)
+		}
 		if attempt == maxAttempts || (!isRetryableUploadError(lastErr) && !hasRetryAfter) {
+			b.noteTelegramRateLimit(lastErr)
 			return lastErr
 		}
 		if status != nil {
@@ -6669,6 +7005,7 @@ func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAtt
 }
 
 func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, settings ChatDownloadSettings) error {
+	var finalErr error
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".m4a", ".flac", ".mp3", ".aac", ".wav", ".opus":
@@ -6676,7 +7013,8 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 			return b.sendAudioFile(session, chatID, filePath, replyToID, status, settings.Format)
 		})
 		if audioErr == nil {
-			return nil
+			finalErr = nil
+			break
 		}
 		if status != nil {
 			status.Update("Audio upload failed, trying document fallback", 0, 0)
@@ -6685,18 +7023,25 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 			return b.sendDocumentFile(chatID, filePath, filepath.Base(filePath), replyToID, status, "")
 		})
 		if docErr == nil {
-			return nil
+			finalErr = nil
+			break
 		}
-		return fmt.Errorf("sendAudio failed: %v; sendDocument fallback failed: %v", audioErr, docErr)
+		finalErr = fmt.Errorf("sendAudio failed: %v; sendDocument fallback failed: %v", audioErr, docErr)
 	case ".mp4", ".m4v", ".mov":
-		return b.sendWithRetry(status, "Video upload", 2, func() error {
+		finalErr = b.sendWithRetry(status, "Video upload", 2, func() error {
 			return b.sendMusicVideoFile(session, chatID, filePath, replyToID, status, settings)
 		})
 	default:
-		return b.sendWithRetry(status, "Document upload", 2, func() error {
+		finalErr = b.sendWithRetry(status, "Document upload", 2, func() error {
 			return b.sendDocumentFile(chatID, filePath, filepath.Base(filePath), replyToID, status, "")
 		})
 	}
+	if finalErr != nil {
+		appRuntimeMetrics.recordUploadFailure()
+	} else {
+		appRuntimeMetrics.recordUploadSuccess()
+	}
+	return finalErr
 }
 
 func formatMVCaption(meta AudioMeta, sizeBytes int64) string {
@@ -6757,6 +7102,9 @@ func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64,
 func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, format string) error {
 	if session == nil {
 		session = newDownloadSession(Config)
+	}
+	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+		return err
 	}
 	format = normalizeTelegramFormat(format)
 	if format == "" {
@@ -6931,14 +7279,18 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		if msg == "" {
 			msg = resp.Status
 		}
-		return fmt.Errorf("telegram sendAudio failed: %s", msg)
+		err = fmt.Errorf("telegram sendAudio failed: %s", msg)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := sendAudioResponse{}
 	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	if hasMeta && meta.TrackID != "" && apiResp.Result.Audio.FileID != "" {
 		b.storeCachedAudio(meta.TrackID, CachedAudio{
@@ -6959,6 +7311,9 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayName string, replyToID int, status *DownloadStatus, cacheKey string) error {
 	if displayName == "" {
 		displayName = filepath.Base(filePath)
+	}
+	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+		return err
 	}
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -7039,14 +7394,18 @@ func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayNam
 	}
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
+		err = fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := sendDocumentResponse{}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	if cacheKey != "" && apiResp.Result.Document.FileID != "" {
 		b.storeCachedDocument(cacheKey, CachedDocument{
@@ -7060,6 +7419,9 @@ func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayNam
 func (b *TelegramBot) sendDocumentByFileID(chatID int64, entry CachedDocument, replyToID int) error {
 	if entry.FileID == "" {
 		return fmt.Errorf("document file_id is empty")
+	}
+	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+		return err
 	}
 	payload := map[string]any{
 		"chat_id":  chatID,
@@ -7084,19 +7446,26 @@ func (b *TelegramBot) sendDocumentByFileID(chatID int64, entry CachedDocument, r
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
+		err = fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := apiResponse{}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	return nil
 }
 
 func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int, caption string, status *DownloadStatus, cacheKey string) error {
+	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+		return err
+	}
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return err
@@ -7177,14 +7546,18 @@ func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int
 	}
 	responseBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
+		err = fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := sendVideoResponse{}
 	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	if cacheKey != "" && apiResp.Result.Video.FileID != "" {
 		b.storeCachedVideo(cacheKey, CachedVideo{
@@ -7198,6 +7571,9 @@ func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int
 func (b *TelegramBot) sendVideoByFileID(chatID int64, entry CachedVideo, replyToID int) error {
 	if entry.FileID == "" {
 		return fmt.Errorf("video file_id is empty")
+	}
+	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+		return err
 	}
 	payload := map[string]any{
 		"chat_id": chatID,
@@ -7222,14 +7598,18 @@ func (b *TelegramBot) sendVideoByFileID(chatID int64, entry CachedVideo, replyTo
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
+		err = fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := apiResponse{}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	return nil
 }
@@ -7683,20 +8063,27 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("telegram sendMessage failed: %s", resp.Status)
+		err = fmt.Errorf("telegram sendMessage failed: %s", resp.Status)
+		b.noteTelegramRateLimit(err)
+		return 0, err
 	}
 	apiResp := sendMessageResponse{}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return 0, err
 	}
 	if !apiResp.OK {
-		return 0, fmt.Errorf("telegram sendMessage error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendMessage error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return 0, err
 	}
 	return apiResp.Result.MessageID, nil
 }
 
 func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyToID int, trackID string) error {
 	entry = b.enrichCachedAudio(trackID, entry)
+	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+		return err
+	}
 	sizeBytes := entry.SizeBytes
 	if sizeBytes <= 0 {
 		sizeBytes = entry.FileSize
@@ -7737,14 +8124,18 @@ func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyTo
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telegram sendAudio failed: %s", strings.TrimSpace(string(responseBody)))
+		err = fmt.Errorf("telegram sendAudio failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := sendAudioResponse{}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	return nil
 }
@@ -7837,10 +8228,14 @@ func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, 
 				return nil
 			}
 			if apiResp.Description != "" {
-				return fmt.Errorf("telegram editMessageText error: %s", apiResp.Description)
+				err = fmt.Errorf("telegram editMessageText error: %s", apiResp.Description)
+				b.noteTelegramRateLimit(err)
+				return err
 			}
 		}
-		return fmt.Errorf("telegram editMessageText failed: %s", strings.TrimSpace(string(responseBody)))
+		err = fmt.Errorf("telegram editMessageText failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	apiResp := apiResponse{}
 	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
@@ -7850,7 +8245,9 @@ func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, 
 		if strings.Contains(apiResp.Description, "message is not modified") {
 			return nil
 		}
-		return fmt.Errorf("telegram editMessageText error: %s", apiResp.Description)
+		err = fmt.Errorf("telegram editMessageText error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
 	}
 	return nil
 }
@@ -7941,7 +8338,6 @@ func (b *TelegramBot) isAllowedChat(chatID int64) bool {
 
 func (b *TelegramBot) setPending(chatID int64, kind string, query string, storefront string, offset int, items []apputils.SearchResultItem, hasNext bool, replyToID int, resultsMessageID int, title string) {
 	b.pendingMu.Lock()
-	defer b.pendingMu.Unlock()
 	if b.pending == nil {
 		b.pending = make(map[int64]map[int]*PendingSelection)
 	}
@@ -7960,6 +8356,8 @@ func (b *TelegramBot) setPending(chatID int64, kind string, query string, storef
 		ReplyToMessageID: replyToID,
 		ResultsMessageID: resultsMessageID,
 	}
+	b.pendingMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) getPending(chatID int64, messageID int) (*PendingSelection, bool) {
@@ -7975,8 +8373,9 @@ func (b *TelegramBot) getPending(chatID int64, messageID int) (*PendingSelection
 
 func (b *TelegramBot) clearPending(chatID int64) {
 	b.pendingMu.Lock()
-	defer b.pendingMu.Unlock()
 	delete(b.pending, chatID)
+	b.pendingMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
@@ -7984,20 +8383,21 @@ func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
 		return
 	}
 	b.pendingMu.Lock()
-	defer b.pendingMu.Unlock()
 	chatPending, ok := b.pending[chatID]
 	if !ok {
+		b.pendingMu.Unlock()
 		return
 	}
 	delete(chatPending, messageID)
 	if len(chatPending) == 0 {
 		delete(b.pending, chatID)
 	}
+	b.pendingMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID string, mediaName string, storefront string, replyToID int, messageID int) {
 	b.transferMu.Lock()
-	defer b.transferMu.Unlock()
 	if b.pendingTransfers == nil {
 		b.pendingTransfers = make(map[int64]map[int]*PendingTransfer)
 	}
@@ -8013,6 +8413,8 @@ func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID
 		MessageID:        messageID,
 		CreatedAt:        time.Now(),
 	}
+	b.transferMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) getPendingTransfer(chatID int64, messageID int) (*PendingTransfer, bool) {
@@ -8028,8 +8430,9 @@ func (b *TelegramBot) getPendingTransfer(chatID int64, messageID int) (*PendingT
 
 func (b *TelegramBot) clearPendingTransfer(chatID int64) {
 	b.transferMu.Lock()
-	defer b.transferMu.Unlock()
 	delete(b.pendingTransfers, chatID)
+	b.transferMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) clearPendingTransferByMessage(chatID int64, messageID int) {
@@ -8037,20 +8440,21 @@ func (b *TelegramBot) clearPendingTransferByMessage(chatID int64, messageID int)
 		return
 	}
 	b.transferMu.Lock()
-	defer b.transferMu.Unlock()
 	chatPending, ok := b.pendingTransfers[chatID]
 	if !ok {
+		b.transferMu.Unlock()
 		return
 	}
 	delete(chatPending, messageID)
 	if len(chatPending) == 0 {
 		delete(b.pendingTransfers, chatID)
 	}
+	b.transferMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) setPendingArtistMode(chatID int64, artistID string, artistName string, storefront string, replyToID int, messageID int) {
 	b.artistModeMu.Lock()
-	defer b.artistModeMu.Unlock()
 	if b.pendingArtistModes == nil {
 		b.pendingArtistModes = make(map[int64]map[int]*PendingArtistMode)
 	}
@@ -8065,6 +8469,8 @@ func (b *TelegramBot) setPendingArtistMode(chatID int64, artistID string, artist
 		MessageID:        messageID,
 		CreatedAt:        time.Now(),
 	}
+	b.artistModeMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) getPendingArtistMode(chatID int64, messageID int) (*PendingArtistMode, bool) {
@@ -8080,8 +8486,9 @@ func (b *TelegramBot) getPendingArtistMode(chatID int64, messageID int) (*Pendin
 
 func (b *TelegramBot) clearPendingArtistMode(chatID int64) {
 	b.artistModeMu.Lock()
-	defer b.artistModeMu.Unlock()
 	delete(b.pendingArtistModes, chatID)
+	b.artistModeMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) clearPendingArtistModeByMessage(chatID int64, messageID int) {
@@ -8089,15 +8496,17 @@ func (b *TelegramBot) clearPendingArtistModeByMessage(chatID int64, messageID in
 		return
 	}
 	b.artistModeMu.Lock()
-	defer b.artistModeMu.Unlock()
 	chatPending, ok := b.pendingArtistModes[chatID]
 	if !ok {
+		b.artistModeMu.Unlock()
 		return
 	}
 	delete(chatPending, messageID)
 	if len(chatPending) == 0 {
 		delete(b.pendingArtistModes, chatID)
 	}
+	b.artistModeMu.Unlock()
+	b.requestStateSave()
 }
 
 func parseCommand(text string) (string, []string, bool) {

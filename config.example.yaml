@@ -73,6 +73,12 @@ telegram-search-language: "zh-Hans"      # Optional search language override (e.
 telegram-max-file-mb: 50          # Max file size to send
 telegram-download-folder: ""      # Optional override for downloads
 telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP)
+telegram-state-file: ""           # Runtime state snapshot path (pending panels + queued/in-flight tasks). Empty -> auto (cache basename + .state.json)
+telegram-metrics-interval-sec: 60  # Periodic metrics/health log interval
+telegram-resource-check-interval-sec: 30  # Resource guard re-check interval
+telegram-min-free-disk-mb: 512    # Minimum free space required on download roots before accepting new tasks
+telegram-min-free-tmp-mb: 256     # Minimum free space required on temp directory before accepting new tasks
+telegram-max-memory-mb: 0         # Optional memory guard (0 = disabled, fallback to max-memory-limit/env if set)
 telegram-download-max-gb: 3        # Cleanup quota for Telegram download folders
 telegram-cleanup-interval-sec: 300  # Periodic janitor interval (incremental cleanup, no per-task full scan)
 telegram-cleanup-scan-interval-sec: 1800 # Full scan fallback interval to heal drift
