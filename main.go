@@ -3976,7 +3976,7 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 			}
 			return
 		}
-		b.handleCommand(msg.Chat.ID, cmd, args, msg.MessageID)
+		b.handleCommand(msg.Chat.ID, msg.Chat.Type, cmd, args, msg.MessageID)
 		return
 	}
 	if !b.isAllowedChat(msg.Chat.ID) {
@@ -4135,7 +4135,7 @@ func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 	_ = b.answerInlineQuery(q.ID, results, true)
 }
 
-func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, replyToID int) {
+func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, args []string, replyToID int) {
 	cmd = normalizeTelegramBotCommand(cmd)
 	switch cmd {
 	case "start", "help":
@@ -4376,7 +4376,10 @@ func (b *TelegramBot) handleCommand(chatID int64, cmd string, args []string, rep
 		settings := b.getChatSettings(chatID)
 		_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 	default:
-		_ = b.sendMessage(chatID, "Unknown command. Send /help for usage.", nil)
+		if strings.EqualFold(strings.TrimSpace(chatType), "private") {
+			_ = b.sendMessage(chatID, "Unknown command. Send /help for usage.", nil)
+		}
+		return
 	}
 }
 
