@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/wuuduf/astrbot-applemusic-service/utils/cmdrunner"
 	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
 	cdm "github.com/wuuduf/astrbot-applemusic-service/utils/runv3/cdm"
 	key "github.com/wuuduf/astrbot-applemusic-service/utils/runv3/key"
@@ -649,12 +649,12 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	}
 	fmt.Println("\nDownloaded.")
 
-	cmd1 := exec.Command("mp4decrypt", "--key", key, tempFile.Name(), filepath.Base(savePath))
-	cmd1.Dir = filepath.Dir(savePath) //设置mp4decrypt的工作目录以解决中文路径错误
-	outlog, err := cmd1.CombinedOutput()
+	result, err := cmdrunner.RunWithOptions(context.Background(), "mp4decrypt", []string{"--key", key, tempFile.Name(), filepath.Base(savePath)}, cmdrunner.RunOptions{
+		Dir: filepath.Dir(savePath), // 设置 mp4decrypt 的工作目录以解决中文路径错误
+	})
 	if err != nil {
 		fmt.Printf("Decrypt failed: %v\n", err)
-		fmt.Printf("Output:\n%s\n", outlog)
+		fmt.Printf("Output:\n%s\n", result.Combined)
 		return err
 	} else {
 		fmt.Println("Decrypted.")

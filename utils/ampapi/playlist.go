@@ -8,6 +8,7 @@ import (
 	"net/url"
 
 	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 func GetPlaylistResp(storefront string, id string, language string, token string) (*PlaylistResp, error) {
@@ -49,8 +50,12 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 	if err != nil {
 		return nil, err
 	}
-	if len(obj.Data[0].Relationships.Tracks.Next) > 0 {
-		next := obj.Data[0].Relationships.Tracks.Next
+	firstData, err := validatePlaylistResponse("ampapi.GetPlaylistResp", obj)
+	if err != nil {
+		return nil, err
+	}
+	if len(firstData.Relationships.Tracks.Next) > 0 {
+		next := firstData.Relationships.Tracks.Next
 		for {
 			req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com%s", next), nil)
 			if err != nil {
@@ -78,7 +83,7 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 			if err != nil {
 				return nil, err
 			}
-			obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, obj2.Data...)
+			firstData.Relationships.Tracks.Data = append(firstData.Relationships.Tracks.Data, obj2.Data...)
 			next = obj2.Next
 			if len(next) == 0 {
 				break
@@ -86,6 +91,13 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 		}
 	}
 	return obj, nil
+}
+
+func validatePlaylistResponse(op string, obj *PlaylistResp) (*PlaylistRespData, error) {
+	if obj == nil {
+		return nil, &safe.AccessError{Op: op, Path: "playlist.response", Reason: "nil response"}
+	}
+	return safe.FirstRef(op, "playlist.data", obj.Data)
 }
 
 type PlaylistResp struct {

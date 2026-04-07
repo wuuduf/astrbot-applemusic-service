@@ -73,4 +73,13 @@ telegram-search-language: "zh-Hans"      # Optional search language override (e.
 telegram-max-file-mb: 50          # Max file size to send
 telegram-download-folder: ""      # Optional override for downloads
 telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP)
-telegram-download-max-gb: 3        # Cleanup threshold for Telegram download folder
+telegram-download-max-gb: 3        # Cleanup quota for Telegram download folders
+telegram-cleanup-interval-sec: 300  # Periodic janitor interval (incremental cleanup, no per-task full scan)
+telegram-cleanup-scan-interval-sec: 1800 # Full scan fallback interval to heal drift
+telegram-cleanup-protect-sec: 120   # New files younger than this are protected from janitor deletion
+
+# AstrBot artifact janitor settings
+astrbot-artifact-max-age-hours: 24  # Max artifact retention age
+astrbot-artifact-max-size-mb: 2048  # Artifact quota (oldest-first eviction when exceeded)
+astrbot-artifact-janitor-interval-sec: 120 # Background janitor interval
+astrbot-artifact-protect-sec: 120   # Newly generated artifacts are protected for this duration

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 func GetAlbumResp(storefront string, id string, language string, token string) (*AlbumResp, error) {
@@ -50,8 +51,12 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 	if err != nil {
 		return nil, err
 	}
-	if len(obj.Data[0].Relationships.Tracks.Next) > 0 {
-		next := obj.Data[0].Relationships.Tracks.Next
+	albumData, err := validateAlbumResponse("ampapi.GetAlbumResp", obj)
+	if err != nil {
+		return nil, err
+	}
+	if len(albumData.Relationships.Tracks.Next) > 0 {
+		next := albumData.Relationships.Tracks.Next
 		for {
 			req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com%s", next), nil)
 			if err != nil {
@@ -79,7 +84,7 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 			if err != nil {
 				return nil, err
 			}
-			obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, obj2.Data...)
+			albumData.Relationships.Tracks.Data = append(albumData.Relationships.Tracks.Data, obj2.Data...)
 			next = obj2.Next
 			if len(next) == 0 {
 				break
@@ -128,8 +133,12 @@ func GetAlbumRespByHref(href string, language string, token string) (*AlbumResp,
 	if err != nil {
 		return nil, err
 	}
-	if len(obj.Data[0].Relationships.Tracks.Next) > 0 {
-		next := obj.Data[0].Relationships.Tracks.Next
+	albumData, err := validateAlbumResponse("ampapi.GetAlbumRespByHref", obj)
+	if err != nil {
+		return nil, err
+	}
+	if len(albumData.Relationships.Tracks.Next) > 0 {
+		next := albumData.Relationships.Tracks.Next
 		for {
 			req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com%s", next), nil)
 			if err != nil {
@@ -157,7 +166,7 @@ func GetAlbumRespByHref(href string, language string, token string) (*AlbumResp,
 			if err != nil {
 				return nil, err
 			}
-			obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, obj2.Data...)
+			albumData.Relationships.Tracks.Data = append(albumData.Relationships.Tracks.Data, obj2.Data...)
 			next = obj2.Next
 			if len(next) == 0 {
 				break
@@ -165,6 +174,13 @@ func GetAlbumRespByHref(href string, language string, token string) (*AlbumResp,
 		}
 	}
 	return obj, nil
+}
+
+func validateAlbumResponse(op string, obj *AlbumResp) (*AlbumRespData, error) {
+	if obj == nil {
+		return nil, &safe.AccessError{Op: op, Path: "album.response", Reason: "nil response"}
+	}
+	return safe.FirstRef(op, "album.data", obj.Data)
 }
 
 type AlbumResp struct {

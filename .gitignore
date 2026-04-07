@@ -16,6 +16,11 @@
 !go.sum
 !main.go
 !astrbot_api.go
+!astrbot_artifact_janitor.go
+!astrbot_artifact_janitor_test.go
+!telegram_cleanup_tracker.go
+!telegram_cleanup_tracker_test.go
+!zip_test.go
 !README.md
 !README-CN.md
 !README-ASTRBOT.md

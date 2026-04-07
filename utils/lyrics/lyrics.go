@@ -9,6 +9,7 @@ import (
 
 	"github.com/beevik/etree"
 	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 type SongLyrics struct {
@@ -73,14 +74,24 @@ func getSongLyrics(songId string, storefront string, token string, userToken str
 	if err := json.NewDecoder(do.Body).Decode(&obj); err != nil {
 		return "", err
 	}
-	if obj.Data != nil {
-		if len(obj.Data[0].Attributes.Ttml) > 0 {
-			return obj.Data[0].Attributes.Ttml, nil
-		}
-		return obj.Data[0].Attributes.TtmlLocalizations, nil
-	} else {
-		return "", errors.New("failed to get lyrics")
+	return extractLyricsPayload(obj)
+}
+
+func extractLyricsPayload(obj *SongLyrics) (string, error) {
+	if obj == nil {
+		return "", &safe.AccessError{Op: "lyrics.extractLyricsPayload", Path: "lyrics.response", Reason: "nil response"}
 	}
+	data, err := safe.FirstRef("lyrics.extractLyricsPayload", "lyrics.data", obj.Data)
+	if err != nil {
+		return "", err
+	}
+	if ttml := strings.TrimSpace(data.Attributes.Ttml); ttml != "" {
+		return ttml, nil
+	}
+	if localized := strings.TrimSpace(data.Attributes.TtmlLocalizations); localized != "" {
+		return localized, nil
+	}
+	return "", &safe.AccessError{Op: "lyrics.extractLyricsPayload", Path: "lyrics.data[0].attributes", Reason: "ttml and ttmlLocalizations are both empty"}
 }
 
 // Use for detect if lyrics have CJK, will be replaced by transliteration if exist.

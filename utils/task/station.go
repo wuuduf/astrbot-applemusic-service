@@ -13,6 +13,7 @@ import (
 	//"github.com/olekukonko/tablewriter"
 
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 type Station struct {
@@ -48,9 +49,13 @@ func (a *Station) GetResp(mutoken, token, l string) error {
 		return errors.New("error getting station response")
 	}
 	a.Resp = *resp
+	stationData, err := safe.FirstRef("task.Station.GetResp", "station.data", a.Resp.Data)
+	if err != nil {
+		return err
+	}
 	//简化高频调用名称
-	a.Type = a.Resp.Data[0].Attributes.PlayParams.Format
-	a.Name = a.Resp.Data[0].Attributes.Name
+	a.Type = stationData.Attributes.PlayParams.Format
+	a.Name = stationData.Attributes.Name
 	if a.Type != "tracks" {
 		return nil
 	}
@@ -66,7 +71,16 @@ func (a *Station) GetResp(mutoken, token, l string) error {
 			fmt.Println("Error getting album response:", err)
 			continue
 		}
-		albumLen := len(albumResp.Data[0].Relationships.Tracks.Data)
+		albumData, dataErr := safe.FirstRef("task.Station.GetResp", "station.track.album.data", albumResp.Data)
+		if dataErr != nil {
+			fmt.Println("Error parsing album response:", dataErr)
+			continue
+		}
+		albumLen := len(albumData.Relationships.Tracks.Data)
+		discTotal := 0
+		if albumLen > 0 {
+			discTotal = albumData.Relationships.Tracks.Data[albumLen-1].Attributes.DiscNumber
+		}
 		a.Tracks = append(a.Tracks, Track{
 			ID:         trackData.ID,
 			Type:       trackData.Type,
@@ -84,9 +98,9 @@ func (a *Station) GetResp(mutoken, token, l string) error {
 
 			Resp:      trackData,
 			PreType:   "stations",
-			DiscTotal: albumResp.Data[0].Relationships.Tracks.Data[albumLen-1].Attributes.DiscNumber,
+			DiscTotal: discTotal,
 			PreID:     a.ID,
-			AlbumData: albumResp.Data[0],
+			AlbumData: *albumData,
 		})
 		a.Tracks[i].PlaylistData.Attributes.Name = a.Name
 		a.Tracks[i].PlaylistData.Attributes.ArtistName = "Apple Music Station"
@@ -95,6 +109,9 @@ func (a *Station) GetResp(mutoken, token, l string) error {
 }
 
 func (a *Station) GetArtwork() string {
+	if len(a.Resp.Data) == 0 {
+		return ""
+	}
 	return a.Resp.Data[0].Attributes.Artwork.URL
 }
 

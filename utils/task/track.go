@@ -2,6 +2,7 @@ package task
 
 import (
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 type Track struct {
@@ -37,13 +38,15 @@ func (t *Track) GetAlbumData(token string) error {
 	if err != nil {
 		return err
 	}
-	t.AlbumData = resp.Data[0]
+	albumData, err := safe.FirstRef("task.Track.GetAlbumData", "album.data", resp.Data)
+	if err != nil {
+		return err
+	}
+	t.AlbumData = *albumData
 	//尝试获取该track所在album的disk总数
-	if len(resp.Data) > 0 {
-		len := len(resp.Data[0].Relationships.Tracks.Data)
-		if len > 0 {
-			t.DiscTotal = resp.Data[0].Relationships.Tracks.Data[len-1].Attributes.DiscNumber
-		}
+	len := len(albumData.Relationships.Tracks.Data)
+	if len > 0 {
+		t.DiscTotal = albumData.Relationships.Tracks.Data[len-1].Attributes.DiscNumber
 	}
 
 	return nil

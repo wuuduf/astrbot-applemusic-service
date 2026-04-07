@@ -83,6 +83,32 @@ curl http://127.0.0.1:27198/healthz
 - `POST /v1/artwork`
 - `POST /v1/lyrics`
 
+## AstrBot Artifact 治理
+
+`--astrbot-api` 会把导出产物写到系统临时目录下的 `amdl-astrbot-api`。  
+现在由后台 janitor 定时清理，不再依赖每次请求触发扫描。
+
+默认策略：
+
+- 最大保留时长：`24h`
+- 最大总占用：`2048 MB`
+- janitor 间隔：`120s`
+- 新文件保护窗口：`120s`（避免误删刚生成/刚返回给上层的文件）
+
+对应配置（`config.yaml`）：
+
+- `astrbot-artifact-max-age-hours`
+- `astrbot-artifact-max-size-mb`
+- `astrbot-artifact-janitor-interval-sec`
+- `astrbot-artifact-protect-sec`
+
+也支持环境变量覆盖：
+
+- `ASTRBOT_ARTIFACT_MAX_AGE_HOURS`
+- `ASTRBOT_ARTIFACT_MAX_SIZE_MB`
+- `ASTRBOT_ARTIFACT_JANITOR_INTERVAL_SEC`
+- `ASTRBOT_ARTIFACT_PROTECT_SEC`
+
 ## 常见部署拓扑
 
 ### 1) 服务端与 AstrBot 同机（非容器）
@@ -113,4 +139,3 @@ curl http://127.0.0.1:27198/healthz
   - 你在监听非本地地址，但没有设置 token。
 - `ENOENT / EACCES` during send file
   - 不是搜索失败，而是文件路径可见性或权限问题。
-

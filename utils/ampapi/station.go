@@ -8,6 +8,7 @@ import (
 	"net/url"
 
 	nethttp "github.com/wuuduf/astrbot-applemusic-service/utils/nethttp"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 func GetStationResp(storefront string, id string, language string, token string) (*StationResp, error) {
@@ -84,7 +85,11 @@ func GetStationAssetsUrlAndServerUrl(id string, mutoken string, token string) (s
 	if err != nil {
 		return "", "", err
 	}
-	return obj.Results.Assets[0].Url, obj.Results.Assets[0].KeyServerUrl, nil
+	firstAsset, err := safe.FirstRef("ampapi.GetStationAssetsUrlAndServerUrl", "station.results.assets", obj.Results.Assets)
+	if err != nil {
+		return "", "", err
+	}
+	return firstAsset.Url, firstAsset.KeyServerUrl, nil
 }
 
 func GetStationNextTracks(id, mutoken, language, token string) (*TrackResp, error) {

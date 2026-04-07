@@ -12,6 +12,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 type Playlist struct {
@@ -47,14 +48,18 @@ func (a *Playlist) GetResp(token, l string) error {
 		return errors.New("error getting album response")
 	}
 	a.Resp = *resp
+	playlistData, err := safe.FirstRef("task.Playlist.GetResp", "playlist.data", a.Resp.Data)
+	if err != nil {
+		return err
+	}
 
-	a.Resp.Data[0].Attributes.ArtistName = "Apple Music"
+	playlistData.Attributes.ArtistName = "Apple Music"
 	//简化高频调用名称
-	a.Name = a.Resp.Data[0].Attributes.Name
+	a.Name = playlistData.Attributes.Name
 	//fmt.Println("Getting album response")
 	//从resp中的Tracks数据中提取trackData信息到新的Track结构体中
-	for i, trackData := range a.Resp.Data[0].Relationships.Tracks.Data {
-		len := len(a.Resp.Data[0].Relationships.Tracks.Data)
+	for i, trackData := range playlistData.Relationships.Tracks.Data {
+		len := len(playlistData.Relationships.Tracks.Data)
 		a.Tracks = append(a.Tracks, Track{
 			ID:         trackData.ID,
 			Type:       trackData.Type,
@@ -74,13 +79,16 @@ func (a *Playlist) GetResp(token, l string) error {
 			PreType: "playlists",
 			//DiscTotal: a.Resp.Data[0].Relationships.Tracks.Data[len-1].Attributes.DiscNumber, 在它处获取
 			PreID:        a.ID,
-			PlaylistData: a.Resp.Data[0],
+			PlaylistData: *playlistData,
 		})
 	}
 	return nil
 }
 
 func (a *Playlist) GetArtwork() string {
+	if len(a.Resp.Data) == 0 {
+		return ""
+	}
 	return a.Resp.Data[0].Attributes.Artwork.URL
 }
 

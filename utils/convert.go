@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wuuduf/astrbot-applemusic-service/utils/cmdrunner"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/task"
 )
@@ -141,16 +143,13 @@ func ConvertIfNeeded(track *task.Track, lrc string, cfg *structs.ConfigSet, cove
 	}
 
 	fmt.Printf("Converting -> %s ...\n", targetFmt)
-	cmd := exec.Command(cfg.FFmpegPath, args...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	start := time.Now()
-	if err := cmd.Run(); err != nil {
+	result, err := cmdrunner.RunWithOptions(context.Background(), cfg.FFmpegPath, args, cmdrunner.RunOptions{})
+	if err != nil {
 		fmt.Println("Conversion failed:", err)
 		// leave original
 		return
 	}
-	fmt.Printf("Conversion completed in %s: %s\n", time.Since(start).Truncate(time.Millisecond), filepath.Base(outPath))
+	fmt.Printf("Conversion completed in %s: %s\n", result.Duration.Truncate(time.Millisecond), filepath.Base(outPath))
 
 	if !cfg.ConvertKeepOriginal {
 		if err := os.Remove(srcPath); err != nil {

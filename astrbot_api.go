@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -18,14 +19,18 @@ import (
 
 	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/cmdrunner"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/lyrics"
-	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 const (
-	defaultAstrBotAPIListen = "127.0.0.1:27198"
-	maxAstrBotJobHistory    = 300
-	astrbotArtifactMaxAge   = 24 * time.Hour
+	defaultAstrBotAPIListen               = "127.0.0.1:27198"
+	maxAstrBotJobHistory                  = 300
+	defaultAstrBotArtifactMaxAge          = 24 * time.Hour
+	defaultAstrBotArtifactMaxSizeMB       = 2048
+	defaultAstrBotArtifactJanitorInterval = 2 * time.Minute
+	defaultAstrBotArtifactProtectAge      = 2 * time.Minute
 )
 
 var astrbotAPIHTTPClient = &http.Client{Timeout: 45 * time.Second}
@@ -35,6 +40,8 @@ type astrbotAPIService struct {
 	apiToken     string
 	listenAddr   string
 	artifactRoot string
+	artifactPolicy
+	artifactState
 
 	seq   atomic.Uint64
 	jobs  map[string]*astrbotJob
@@ -42,6 +49,20 @@ type astrbotAPIService struct {
 	mu    sync.RWMutex
 
 	queue chan *astrbotJob
+}
+
+type artifactPolicy struct {
+	maxAge          time.Duration
+	maxBytes        int64
+	janitorInterval time.Duration
+	protectAge      time.Duration
+}
+
+type artifactState struct {
+	artifactMu          sync.Mutex
+	activeArtifactIO    map[string]int
+	artifactJanitorStop chan struct{}
+	artifactJanitorWG   sync.WaitGroup
 }
 
 type astrbotJobStatus string
@@ -199,9 +220,20 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 		artifactRoot: artifactRoot,
 		jobs:         make(map[string]*astrbotJob),
 		queue:        make(chan *astrbotJob, maxAstrBotJobHistory),
+		artifactPolicy: artifactPolicy{
+			maxAge:          resolveAstrBotArtifactMaxAge(),
+			maxBytes:        resolveAstrBotArtifactMaxBytes(),
+			janitorInterval: resolveAstrBotArtifactJanitorInterval(),
+			protectAge:      resolveAstrBotArtifactProtectAge(),
+		},
+		artifactState: artifactState{
+			activeArtifactIO: make(map[string]int),
+		},
 	}
 	service.startWorker()
-	service.cleanupArtifacts(astrbotArtifactMaxAge)
+	service.cleanupArtifactsNow()
+	service.startArtifactJanitor()
+	defer service.stopArtifactJanitor()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", service.handleHealth)
@@ -225,6 +257,13 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 
 	fmt.Printf("AstrBot API server listening on http://%s\n", service.listenAddr)
 	fmt.Printf("AstrBot API artifact root: %s\n", service.artifactRoot)
+	fmt.Printf(
+		"AstrBot API artifact policy: max-age=%s quota=%s janitor=%s protect-age=%s\n",
+		service.maxAge,
+		formatBytes(service.maxBytes),
+		service.janitorInterval,
+		service.protectAge,
+	)
 	if apiToken == "" {
 		fmt.Println("AstrBot API auth: disabled (set ASTRBOT_API_TOKEN to enable)")
 	} else {
@@ -669,7 +708,6 @@ func (s *astrbotAPIService) handleArtwork(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, astrbotErrorResponse{Error: "method not allowed"})
 		return
 	}
-	s.cleanupArtifacts(astrbotArtifactMaxAge)
 	var req astrbotArtworkRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, astrbotErrorResponse{Error: err.Error()})
@@ -681,7 +719,7 @@ func (s *astrbotAPIService) handleArtwork(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if req.Animated {
-		s.handleArtworkAnimated(w, target)
+		s.handleArtworkAnimated(r.Context(), w, target)
 		return
 	}
 	resp, err := s.fetchArtwork(target)
@@ -716,7 +754,10 @@ func (s *astrbotAPIService) handleArtwork(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (s *astrbotAPIService) handleArtworkAnimated(w http.ResponseWriter, target *AppleURLTarget) {
+func (s *astrbotAPIService) handleArtworkAnimated(ctx context.Context, w http.ResponseWriter, target *AppleURLTarget) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if target == nil {
 		writeJSON(w, http.StatusBadRequest, astrbotErrorResponse{Error: "invalid target"})
 		return
@@ -753,9 +794,9 @@ func (s *astrbotAPIService) handleArtworkAnimated(w http.ResponseWriter, target 
 	tmpPath := tmpFile.Name()
 	_ = tmpFile.Close()
 	defer os.Remove(tmpPath)
-	cmd := exec.Command("ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errMsg := strings.TrimSpace(string(output))
+	result, err := cmdrunner.RunWithOptions(ctx, "ffmpeg", []string{"-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath}, cmdrunner.RunOptions{})
+	if err != nil {
+		errMsg := strings.TrimSpace(result.Combined)
 		if errMsg == "" {
 			errMsg = err.Error()
 		}
@@ -788,7 +829,6 @@ func (s *astrbotAPIService) handleLyrics(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusMethodNotAllowed, astrbotErrorResponse{Error: "method not allowed"})
 		return
 	}
-	s.cleanupArtifacts(astrbotArtifactMaxAge)
 	var req astrbotLyricsRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, astrbotErrorResponse{Error: err.Error()})
@@ -822,8 +862,11 @@ func (s *astrbotAPIService) handleLyrics(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		baseName := "song-" + target.ID
-		if resp, err := ampapi.GetSongResp(storefront, target.ID, Config.Language, s.appleToken); err == nil && len(resp.Data) > 0 {
-			baseName = composeArtistTitle(resp.Data[0].Attributes.ArtistName, resp.Data[0].Attributes.Name)
+		if resp, err := ampapi.GetSongResp(storefront, target.ID, Config.Language, s.appleToken); err == nil {
+			item, dataErr := firstSongData("astrbot.handleLyrics.songBaseName", resp)
+			if dataErr == nil {
+				baseName = composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name)
+			}
 		}
 		displayName := sanitizeFileBaseName(baseName) + ".lyrics." + format
 		path, err := s.writeArtifactTextFile(displayName, content)
@@ -955,25 +998,17 @@ func (s *astrbotAPIService) normalizeDownloadRequest(req astrbotDownloadRequest)
 }
 
 func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
-	lastDownloadedPaths = nil
-	clearDownloadState()
-	counter = structs.Counter{}
-	okDict = make(map[string][]int)
-
-	dl_atmos = false
-	dl_aac = false
-	dl_select = false
-	dl_song = false
-
+	session := newDownloadSession(Config)
+	session.resetState()
 	quality := normalizeTelegramFormat(req.Quality)
 	if quality == "" {
 		quality = defaultTelegramFormat
 	}
 	switch quality {
 	case telegramFormatAtmos:
-		dl_atmos = true
+		session.DlAtmos = true
 	case telegramFormatAac:
-		dl_aac = true
+		session.DlAac = true
 	}
 	includeLyrics := req.IncludeLyrics != nil && *req.IncludeLyrics
 	includeCover := req.IncludeCover == nil || *req.IncludeCover
@@ -990,50 +1025,25 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 		transferMode = transferModeOneByOne
 	}
 
-	prevAacType := Config.AacType
-	prevMVAudioType := Config.MVAudioType
-	prevLrcFormat := Config.LrcFormat
-	prevSaveLrcFile := Config.SaveLrcFile
-	prevEmbedLrc := Config.EmbedLrc
-	prevSaveAnimatedArtwork := Config.SaveAnimatedArtwork
-	prevConvertAfterDownload := Config.ConvertAfterDownload
-	prevConvertFormat := Config.ConvertFormat
-	prevConvertKeepOriginal := Config.ConvertKeepOriginal
-	prevConvertSkipLossyToLossless := Config.ConvertSkipLossyToLossless
-	prevStaticCoverDownload := botStaticCoverDownload
-	defer func() {
-		Config.AacType = prevAacType
-		Config.MVAudioType = prevMVAudioType
-		Config.LrcFormat = prevLrcFormat
-		Config.SaveLrcFile = prevSaveLrcFile
-		Config.EmbedLrc = prevEmbedLrc
-		Config.SaveAnimatedArtwork = prevSaveAnimatedArtwork
-		Config.ConvertAfterDownload = prevConvertAfterDownload
-		Config.ConvertFormat = prevConvertFormat
-		Config.ConvertKeepOriginal = prevConvertKeepOriginal
-		Config.ConvertSkipLossyToLossless = prevConvertSkipLossyToLossless
-		botStaticCoverDownload = prevStaticCoverDownload
-	}()
+	session.Config.AacType = req.AACType
+	session.Config.MVAudioType = req.MVAudioType
+	session.Config.LrcFormat = lyricsFormat
+	session.Config.SaveLrcFile = includeLyrics
+	session.Config.EmbedLrc = false
+	session.Config.SaveAnimatedArtwork = includeAnimated
+	session.StaticCoverDownload = includeCover
 
-	Config.AacType = req.AACType
-	Config.MVAudioType = req.MVAudioType
-	Config.LrcFormat = lyricsFormat
-	Config.SaveLrcFile = includeLyrics
-	Config.EmbedLrc = false
-	Config.SaveAnimatedArtwork = includeAnimated
-	botStaticCoverDownload = includeCover
-
-	Config.ConvertAfterDownload = false
+	session.Config.ConvertAfterDownload = false
 	if quality == telegramFormatFlac {
-		Config.ConvertAfterDownload = true
-		Config.ConvertFormat = telegramFormatFlac
-		Config.ConvertKeepOriginal = false
-		Config.ConvertSkipLossyToLossless = false
-		if _, err := exec.LookPath(Config.FFmpegPath); err != nil {
-			return nil, fmt.Errorf("ffmpeg not found at '%s'", Config.FFmpegPath)
+		session.Config.ConvertAfterDownload = true
+		session.Config.ConvertFormat = telegramFormatFlac
+		session.Config.ConvertKeepOriginal = false
+		session.Config.ConvertSkipLossyToLossless = false
+		if _, err := exec.LookPath(session.Config.FFmpegPath); err != nil {
+			return nil, fmt.Errorf("ffmpeg not found at '%s'", session.Config.FFmpegPath)
 		}
 	} else {
-		Config.ConvertFormat = ""
+		session.Config.ConvertFormat = ""
 	}
 
 	storefront := normalizeStorefront(req.Storefront)
@@ -1041,33 +1051,39 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 	if mediaID == "" {
 		return nil, fmt.Errorf("media id is required")
 	}
+	jobCtx := JobContext{
+		Session:        session,
+		Token:          s.appleToken,
+		Storefront:     storefront,
+		MediaUserToken: session.Config.MediaUserToken,
+	}
 	var err error
 	switch req.MediaType {
 	case mediaTypeSong:
-		dl_song = true
-		err = ripSong(mediaID, s.appleToken, storefront, Config.MediaUserToken)
-		dl_song = false
+		session.DlSong = true
+		err = ripSong(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken)
+		session.DlSong = false
 	case mediaTypeAlbum:
-		err = ripAlbum(mediaID, s.appleToken, storefront, Config.MediaUserToken, "")
+		err = ripAlbum(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken, "")
 	case mediaTypePlaylist:
-		err = ripPlaylist(mediaID, s.appleToken, storefront, Config.MediaUserToken)
+		err = ripPlaylist(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken)
 	case mediaTypeStation:
-		if len(strings.TrimSpace(Config.MediaUserToken)) <= 50 {
+		if len(strings.TrimSpace(jobCtx.MediaUserToken)) <= 50 {
 			return nil, fmt.Errorf("station download requires media-user-token")
 		}
-		err = ripStation(mediaID, s.appleToken, storefront, Config.MediaUserToken)
+		err = ripStation(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken)
 	case mediaTypeMusicVideo:
-		if len(strings.TrimSpace(Config.MediaUserToken)) <= 50 {
+		if len(strings.TrimSpace(jobCtx.MediaUserToken)) <= 50 {
 			return nil, fmt.Errorf("mv download requires media-user-token")
 		}
 		if _, lookErr := exec.LookPath("mp4decrypt"); lookErr != nil {
 			return nil, fmt.Errorf("mv download requires mp4decrypt in PATH")
 		}
-		saveDir := strings.TrimSpace(Config.AlacSaveFolder)
+		saveDir := strings.TrimSpace(session.Config.AlacSaveFolder)
 		if saveDir == "" {
 			saveDir = "AM-DL downloads"
 		}
-		err = mvDownloader(mediaID, saveDir, s.appleToken, storefront, Config.MediaUserToken, nil)
+		err = mvDownloader(jobCtx.Session, mediaID, saveDir, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken, nil)
 	default:
 		return nil, fmt.Errorf("unsupported media type: %s", req.MediaType)
 	}
@@ -1075,7 +1091,7 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 		return nil, err
 	}
 
-	paths := append([]string{}, lastDownloadedPaths...)
+	paths := append([]string{}, session.LastDownloadedPaths...)
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no files were downloaded")
 	}
@@ -1085,7 +1101,7 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 	}
 	files := make([]astrbotOutputFile, 0, len(paths))
 	for _, path := range paths {
-		item, ferr := buildOutputFile(path, false)
+		item, ferr := buildOutputFileWithSession(session, path, false)
 		if ferr != nil {
 			continue
 		}
@@ -1107,7 +1123,7 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 			finalZip, perr := s.persistArtifactFile(zipPath, displayName)
 			_ = os.Remove(zipPath)
 			if perr == nil {
-				if zipItem, ierr := buildOutputFile(finalZip, true); ierr == nil {
+				if zipItem, ierr := buildOutputFileWithSession(session, finalZip, true); ierr == nil {
 					result.ZipFile = &zipItem
 				}
 			}
@@ -1204,10 +1220,13 @@ func (s *astrbotAPIService) exportAlbumLyrics(albumID string, storefront string,
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to load album: %w", err)
 	}
-	if resp == nil || len(resp.Data) == 0 {
+	if resp == nil {
 		return nil, 0, fmt.Errorf("album not found")
 	}
-	album := resp.Data[0]
+	album, err := firstAlbumData("astrbot.exportAlbumLyrics", resp)
+	if err != nil {
+		return nil, 0, err
+	}
 	albumDir, err := os.MkdirTemp(s.artifactRoot, "lyrics-album-*")
 	if err != nil {
 		return nil, 0, err
@@ -1260,22 +1279,25 @@ func (s *astrbotAPIService) fetchArtwork(target *AppleURLTarget) (artworkFetchRe
 		if err != nil {
 			return artworkFetchResult{}, err
 		}
-		if len(resp.Data) == 0 {
-			return artworkFetchResult{}, fmt.Errorf("song not found")
+		item, err := firstSongData("astrbot.fetchArtwork.song", resp)
+		if err != nil {
+			return artworkFetchResult{}, err
 		}
-		item := resp.Data[0]
 		result := artworkFetchResult{
 			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
 		}
-		if albums := item.Relationships.Albums.Data; len(albums) > 0 {
-			albumID := strings.TrimSpace(albums[0].ID)
+		if albumRef, albumErr := safe.FirstRef("astrbot.fetchArtwork.song", "song.relationships.albums.data", item.Relationships.Albums.Data); albumErr == nil {
+			albumID := strings.TrimSpace(albumRef.ID)
 			if albumID != "" {
-				if albumResp, err := ampapi.GetAlbumResp(storefront, albumID, Config.Language, s.appleToken); err == nil && len(albumResp.Data) > 0 {
-					result.MotionURL = firstNonEmpty(
-						albumResp.Data[0].Attributes.EditorialVideo.MotionSquare.Video,
-						albumResp.Data[0].Attributes.EditorialVideo.MotionTall.Video,
-					)
+				if albumResp, err := ampapi.GetAlbumResp(storefront, albumID, Config.Language, s.appleToken); err == nil {
+					albumData, dataErr := firstAlbumData("astrbot.fetchArtwork.song.album", albumResp)
+					if dataErr == nil {
+						result.MotionURL = firstNonEmpty(
+							albumData.Attributes.EditorialVideo.MotionSquare.Video,
+							albumData.Attributes.EditorialVideo.MotionTall.Video,
+						)
+					}
 				}
 			}
 		}
@@ -1291,10 +1313,10 @@ func (s *astrbotAPIService) fetchArtwork(target *AppleURLTarget) (artworkFetchRe
 		if err != nil {
 			return artworkFetchResult{}, err
 		}
-		if len(resp.Data) == 0 {
-			return artworkFetchResult{}, fmt.Errorf("album not found")
+		item, err := firstAlbumData("astrbot.fetchArtwork.album", resp)
+		if err != nil {
+			return artworkFetchResult{}, err
 		}
-		item := resp.Data[0]
 		result := artworkFetchResult{
 			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
@@ -1315,10 +1337,10 @@ func (s *astrbotAPIService) fetchArtwork(target *AppleURLTarget) (artworkFetchRe
 		if err != nil {
 			return artworkFetchResult{}, err
 		}
-		if len(resp.Data) == 0 {
-			return artworkFetchResult{}, fmt.Errorf("playlist not found")
+		item, err := firstPlaylistData("astrbot.fetchArtwork.playlist", resp)
+		if err != nil {
+			return artworkFetchResult{}, err
 		}
-		item := resp.Data[0]
 		result := artworkFetchResult{
 			DisplayName: strings.TrimSpace(item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
@@ -1339,10 +1361,10 @@ func (s *astrbotAPIService) fetchArtwork(target *AppleURLTarget) (artworkFetchRe
 		if err != nil {
 			return artworkFetchResult{}, err
 		}
-		if len(resp.Data) == 0 {
-			return artworkFetchResult{}, fmt.Errorf("station not found")
+		item, err := firstStationData("astrbot.fetchArtwork.station", resp)
+		if err != nil {
+			return artworkFetchResult{}, err
 		}
-		item := resp.Data[0]
 		result := artworkFetchResult{
 			DisplayName: strings.TrimSpace(item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
@@ -1363,10 +1385,10 @@ func (s *astrbotAPIService) fetchArtwork(target *AppleURLTarget) (artworkFetchRe
 		if err != nil {
 			return artworkFetchResult{}, err
 		}
-		if len(resp.Data) == 0 {
-			return artworkFetchResult{}, fmt.Errorf("music video not found")
+		item, err := firstMusicVideoData("astrbot.fetchArtwork.musicVideo", resp)
+		if err != nil {
+			return artworkFetchResult{}, err
 		}
-		item := resp.Data[0]
 		result := artworkFetchResult{
 			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
@@ -1417,11 +1439,12 @@ func (s *astrbotAPIService) fetchArtistProfile(storefront string, artistID strin
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return "", "", err
 	}
-	if len(data.Data) == 0 {
-		return "", "", fmt.Errorf("artist not found")
+	item, err := safe.FirstRef("astrbot.fetchArtistProfile", "artist.data", data.Data)
+	if err != nil {
+		return "", "", err
 	}
-	name := strings.TrimSpace(data.Data[0].Attributes.Name)
-	coverURL := strings.TrimSpace(data.Data[0].Attributes.Artwork.URL)
+	name := strings.TrimSpace(item.Attributes.Name)
+	coverURL := strings.TrimSpace(item.Attributes.Artwork.URL)
 	if coverURL == "" {
 		return name, "", fmt.Errorf("artist profile photo unavailable")
 	}
@@ -1503,6 +1526,10 @@ func itemTypeToMediaType(itemType string) string {
 }
 
 func buildOutputFile(path string, temporary bool) (astrbotOutputFile, error) {
+	return buildOutputFileWithSession(nil, path, temporary)
+}
+
+func buildOutputFileWithSession(session *DownloadSession, path string, temporary bool) (astrbotOutputFile, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		absPath = path
@@ -1518,11 +1545,13 @@ func buildOutputFile(path string, temporary bool) (astrbotOutputFile, error) {
 		Kind:      detectFileKind(absPath),
 		Temporary: temporary,
 	}
-	if meta, ok := getDownloadedMeta(absPath); ok {
-		item.TrackID = meta.TrackID
-		item.Title = meta.Title
-		item.Performer = meta.Performer
-		item.DurationMillis = meta.DurationMillis
+	if session != nil {
+		if meta, ok := session.getDownloadedMeta(absPath); ok {
+			item.TrackID = meta.TrackID
+			item.Title = meta.Title
+			item.Performer = meta.Performer
+			item.DurationMillis = meta.DurationMillis
+		}
 	}
 	return item, nil
 }
@@ -1557,6 +1586,8 @@ func (s *astrbotAPIService) persistArtifactFile(srcPath string, displayName stri
 	if _, err := os.Stat(targetPath); err == nil {
 		targetPath = filepath.Join(s.artifactRoot, fmt.Sprintf("%d-%s", time.Now().UnixNano(), displayName))
 	}
+	s.beginArtifactIO(targetPath)
+	defer s.endArtifactIO(targetPath)
 	if err := copyFile(srcPath, targetPath); err != nil {
 		return "", err
 	}
@@ -1575,6 +1606,8 @@ func (s *astrbotAPIService) writeArtifactTextFile(displayName string, content st
 	if _, err := os.Stat(targetPath); err == nil {
 		targetPath = filepath.Join(s.artifactRoot, fmt.Sprintf("%d-%s", time.Now().UnixNano(), displayName))
 	}
+	s.beginArtifactIO(targetPath)
+	defer s.endArtifactIO(targetPath)
 	if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
 		return "", err
 	}
@@ -1601,26 +1634,27 @@ func copyFile(srcPath string, dstPath string) error {
 	return dst.Close()
 }
 
-func (s *astrbotAPIService) cleanupArtifacts(maxAge time.Duration) {
-	if maxAge <= 0 {
+func (s *astrbotAPIService) beginArtifactIO(path string) {
+	if strings.TrimSpace(path) == "" {
 		return
 	}
-	entries, err := os.ReadDir(s.artifactRoot)
-	if err != nil {
+	s.artifactMu.Lock()
+	defer s.artifactMu.Unlock()
+	s.activeArtifactIO[path]++
+}
+
+func (s *astrbotAPIService) endArtifactIO(path string) {
+	if strings.TrimSpace(path) == "" {
 		return
 	}
-	now := time.Now()
-	for _, entry := range entries {
-		path := filepath.Join(s.artifactRoot, entry.Name())
-		info, ierr := entry.Info()
-		if ierr != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) <= maxAge {
-			continue
-		}
-		_ = os.RemoveAll(path)
+	s.artifactMu.Lock()
+	defer s.artifactMu.Unlock()
+	count := s.activeArtifactIO[path]
+	if count <= 1 {
+		delete(s.activeArtifactIO, path)
+		return
 	}
+	s.activeArtifactIO[path] = count - 1
 }
 
 func boolPtr(v bool) *bool {

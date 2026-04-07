@@ -45,6 +45,14 @@ For AstrBot/NapCat usage, pair this service with the plugin project:
 - Plugin: [astrbot-plugin-applemusic](https://github.com/wuuduf/astrbot-plugin-applemusic)
 - Service API docs: [README-ASTRBOT.md](./README-ASTRBOT.md)
 
+AstrBot artifact janitor defaults (also configurable):
+
+- `astrbot-artifact-max-age-hours=24`
+- `astrbot-artifact-max-size-mb=2048`
+- `astrbot-artifact-janitor-interval-sec=120`
+- `astrbot-artifact-protect-sec=120`
+- Env override: `ASTRBOT_ARTIFACT_MAX_AGE_HOURS`, `ASTRBOT_ARTIFACT_MAX_SIZE_MB`, `ASTRBOT_ARTIFACT_JANITOR_INTERVAL_SEC`, `ASTRBOT_ARTIFACT_PROTECT_SEC`
+
 Responsibility split:
 
 1. Plugin side: command parsing, sessions, message sending.
@@ -177,8 +185,13 @@ Notes:
 - ZIP results are cached via Telegram `file_id` for song/album/playlist/station.
 - MV supports send-as-video, fallback-to-document, and Telegram `file_id` cache re-send.
 - If ZIP is too large for Telegram, the bot falls back to one-by-one transfer automatically.
-- If the download folder exceeds the limit, older files are removed (default 3GB; set `telegram-download-max-gb`, Telegram cache remains).
-- If `AMDL_TMPDIR`/`TMPDIR` is set (and not `/tmp` or `/var/tmp`), that temp directory is included in the same cleanup threshold.
+- Telegram download cleanup is handled by a background janitor (no per-download full directory scan).
+- Quota is still controlled by `telegram-download-max-gb` (default `3` GB, Telegram cache file is excluded).
+- Janitor cadence and safety window:
+  - `telegram-cleanup-interval-sec` (default `300`)
+  - `telegram-cleanup-scan-interval-sec` (default `1800`, full-scan fallback)
+  - `telegram-cleanup-protect-sec` (default `120`, protects very new files from deletion)
+- If `AMDL_TMPDIR`/`TMPDIR` is set (and not `/tmp` or `/var/tmp`), that directory is included in janitor roots.
 - ZIP temp files prefer download directories first (fallback to system temp). You can force temp directory via `AMDL_TMPDIR=/path/to/dir`.
 - Apple API/downloader outbound HTTP timeout defaults to `45s`; tune it with `AMDL_HTTP_TIMEOUT_SEC` (minimum `5`).
 - `runv2` stream idle timeout defaults to `300s`; tune with `AMDL_RUNV2_IDLE_TIMEOUT_SEC` (`0` disables idle timeout).

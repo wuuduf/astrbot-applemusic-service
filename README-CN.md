@@ -43,6 +43,14 @@
 - 插件仓库：[astrbot-plugin-applemusic](https://github.com/wuuduf/astrbot-plugin-applemusic)
 - 服务端 AstrBot 文档：[README-ASTRBOT.md](./README-ASTRBOT.md)
 
+AstrBot artifact janitor 默认值（可在配置中调整）：
+
+- `astrbot-artifact-max-age-hours=24`
+- `astrbot-artifact-max-size-mb=2048`
+- `astrbot-artifact-janitor-interval-sec=120`
+- `astrbot-artifact-protect-sec=120`
+- 环境变量覆盖：`ASTRBOT_ARTIFACT_MAX_AGE_HOURS`、`ASTRBOT_ARTIFACT_MAX_SIZE_MB`、`ASTRBOT_ARTIFACT_JANITOR_INTERVAL_SEC`、`ASTRBOT_ARTIFACT_PROTECT_SEC`
+
 核心原则：
 
 1. 插件负责命令/会话/消息发送。
@@ -136,8 +144,13 @@ docker run --rm -it \
 - song/album/playlist/station 的 ZIP 会缓存 Telegram `file_id`，重复请求可秒传。
 - MV 支持优先 `video` 发送、失败回退 `document`，并支持 Telegram `file_id` 缓存复用。
 - ZIP 超过 Telegram 限制时会自动回退为逐个发送。
-- 下载目录超过限制会自动清理旧文件（默认 3GB，可设置 `telegram-download-max-gb`，不影响 Telegram 缓存）。
-- 若设置了 `AMDL_TMPDIR`/`TMPDIR`（且不是 `/tmp`、`/var/tmp`），该目录也会纳入同一清理阈值。
+- Telegram 下载目录改为后台 janitor 清理（不再每个任务结束就全量扫描目录）。
+- 配额仍由 `telegram-download-max-gb` 控制（默认 `3` GB，Telegram cache 文件会被排除）。
+- janitor 节奏和保护窗口：
+  - `telegram-cleanup-interval-sec`（默认 `300`）
+  - `telegram-cleanup-scan-interval-sec`（默认 `1800`，定时全量兜底扫描）
+  - `telegram-cleanup-protect-sec`（默认 `120`，保护刚生成的新文件）
+- 若设置了 `AMDL_TMPDIR`/`TMPDIR`（且不是 `/tmp`、`/var/tmp`），该目录也会纳入 janitor 清理根目录。
 - ZIP 临时文件会优先写入下载目录（失败才回退系统临时目录）。可通过 `AMDL_TMPDIR=/path/to/dir` 强制指定临时目录。
 - Apple API/下载链路的 HTTP 请求默认超时为 `45s`，可通过 `AMDL_HTTP_TIMEOUT_SEC` 调整（最小 `5`）。
 - `runv2` 下载流默认空闲超时为 `300s`，可通过 `AMDL_RUNV2_IDLE_TIMEOUT_SEC` 调整（设为 `0` 可关闭空闲超时）。
