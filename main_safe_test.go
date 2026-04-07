@@ -148,3 +148,71 @@ func TestPendingSelectionIsolatedByMessageID(t *testing.T) {
 		t.Fatalf("message 102 pending should remain")
 	}
 }
+
+func TestPendingTransferIsolatedByMessageID(t *testing.T) {
+	chatID := int64(2001)
+	b := &TelegramBot{
+		pendingTransfers: make(map[int64]map[int]*PendingTransfer),
+	}
+
+	b.setPendingTransfer(chatID, mediaTypeAlbum, "a1", "Album 1", "us", 21, 201)
+	b.setPendingTransfer(chatID, mediaTypePlaylist, "p1", "Playlist 1", "us", 22, 202)
+
+	pending1, ok := b.getPendingTransfer(chatID, 201)
+	if !ok {
+		t.Fatalf("expected pending transfer for message 201")
+	}
+	if pending1.MediaID != "a1" || pending1.ReplyToMessageID != 21 {
+		t.Fatalf("unexpected pending transfer 201: %+v", pending1)
+	}
+
+	pending2, ok := b.getPendingTransfer(chatID, 202)
+	if !ok {
+		t.Fatalf("expected pending transfer for message 202")
+	}
+	if pending2.MediaID != "p1" || pending2.ReplyToMessageID != 22 {
+		t.Fatalf("unexpected pending transfer 202: %+v", pending2)
+	}
+
+	b.clearPendingTransferByMessage(chatID, 201)
+	if _, ok := b.getPendingTransfer(chatID, 201); ok {
+		t.Fatalf("message 201 transfer should be cleared")
+	}
+	if _, ok := b.getPendingTransfer(chatID, 202); !ok {
+		t.Fatalf("message 202 transfer should remain")
+	}
+}
+
+func TestPendingArtistModeIsolatedByMessageID(t *testing.T) {
+	chatID := int64(3001)
+	b := &TelegramBot{
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+	}
+
+	b.setPendingArtistMode(chatID, "artist-a", "Artist A", "us", 31, 301)
+	b.setPendingArtistMode(chatID, "artist-b", "Artist B", "us", 32, 302)
+
+	pending1, ok := b.getPendingArtistMode(chatID, 301)
+	if !ok {
+		t.Fatalf("expected pending artist mode for message 301")
+	}
+	if pending1.ArtistID != "artist-a" || pending1.ReplyToMessageID != 31 {
+		t.Fatalf("unexpected pending artist mode 301: %+v", pending1)
+	}
+
+	pending2, ok := b.getPendingArtistMode(chatID, 302)
+	if !ok {
+		t.Fatalf("expected pending artist mode for message 302")
+	}
+	if pending2.ArtistID != "artist-b" || pending2.ReplyToMessageID != 32 {
+		t.Fatalf("unexpected pending artist mode 302: %+v", pending2)
+	}
+
+	b.clearPendingArtistModeByMessage(chatID, 301)
+	if _, ok := b.getPendingArtistMode(chatID, 301); ok {
+		t.Fatalf("message 301 artist mode should be cleared")
+	}
+	if _, ok := b.getPendingArtistMode(chatID, 302); !ok {
+		t.Fatalf("message 302 artist mode should remain")
+	}
+}

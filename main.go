@@ -2814,10 +2814,10 @@ type TelegramBot struct {
 	pending   map[int64]map[int]*PendingSelection
 
 	transferMu       sync.Mutex
-	pendingTransfers map[int64]*PendingTransfer
+	pendingTransfers map[int64]map[int]*PendingTransfer
 
 	artistModeMu       sync.Mutex
-	pendingArtistModes map[int64]*PendingArtistMode
+	pendingArtistModes map[int64]map[int]*PendingArtistMode
 
 	queueMu       sync.Mutex
 	downloadQueue chan *downloadRequest
@@ -3190,8 +3190,8 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		maxFileBytes:       maxFileBytes,
 		chatSettings:       make(map[int64]ChatDownloadSettings),
 		pending:            make(map[int64]map[int]*PendingSelection),
-		pendingTransfers:   make(map[int64]*PendingTransfer),
-		pendingArtistModes: make(map[int64]*PendingArtistMode),
+		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
 		downloadQueue:      make(chan *downloadRequest, queueSize),
 		workerLimit:        defaultTaskWorkerLimit,
 		cacheFile:          cacheFile,
@@ -5392,15 +5392,12 @@ func (b *TelegramBot) startArtistSelection(chatID int64, artistID string, artist
 }
 
 func (b *TelegramBot) handleArtistModeSelection(chatID int64, messageID int, relationship string) {
-	pending, ok := b.getPendingArtistMode(chatID)
+	pending, ok := b.getPendingArtistMode(chatID, messageID)
 	if !ok {
 		return
 	}
-	if pending.MessageID != 0 && pending.MessageID != messageID {
-		return
-	}
 	if time.Since(pending.CreatedAt) > pendingTTL {
-		b.clearPendingArtistMode(chatID)
+		b.clearPendingArtistModeByMessage(chatID, messageID)
 		_ = b.editMessageText(chatID, messageID, "Selection expired. Please request the artist again.", nil)
 		return
 	}
@@ -5444,7 +5441,7 @@ func (b *TelegramBot) handleArtistModeSelection(chatID int64, messageID int, rel
 		return
 	}
 	b.setPending(chatID, kind, pending.ArtistID, pending.Storefront, 0, items, hasNext, replyToID, resultMessageID, pending.ArtistName)
-	b.clearPendingArtistMode(chatID)
+	b.clearPendingArtistModeByMessage(chatID, messageID)
 }
 
 func (b *TelegramBot) handleSearch(chatID int64, kind string, query string, replyToID int) {
@@ -5532,22 +5529,19 @@ func (b *TelegramBot) handleSelection(chatID int64, messageID int, choice int) {
 }
 
 func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode string) {
-	pending, ok := b.getPendingTransfer(chatID)
+	pending, ok := b.getPendingTransfer(chatID, messageID)
 	if !ok {
 		return
 	}
-	if pending.MessageID != 0 && messageID != pending.MessageID {
-		return
-	}
 	if time.Since(pending.CreatedAt) > pendingTTL {
-		b.clearPendingTransfer(chatID)
+		b.clearPendingTransferByMessage(chatID, messageID)
 		_ = b.editMessageText(chatID, messageID, "Selection expired. Please request it again.", nil)
 		return
 	}
 	mediaID := pending.MediaID
 	mediaType := pending.MediaType
 	replyToID := pending.ReplyToMessageID
-	b.clearPendingTransfer(chatID)
+	b.clearPendingTransferByMessage(chatID, messageID)
 	settings := b.getChatSettings(chatID)
 
 	if mediaType == mediaTypeArtistAsset {
@@ -7912,7 +7906,13 @@ func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
 func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID string, mediaName string, storefront string, replyToID int, messageID int) {
 	b.transferMu.Lock()
 	defer b.transferMu.Unlock()
-	b.pendingTransfers[chatID] = &PendingTransfer{
+	if b.pendingTransfers == nil {
+		b.pendingTransfers = make(map[int64]map[int]*PendingTransfer)
+	}
+	if b.pendingTransfers[chatID] == nil {
+		b.pendingTransfers[chatID] = make(map[int]*PendingTransfer)
+	}
+	b.pendingTransfers[chatID][messageID] = &PendingTransfer{
 		MediaType:        mediaType,
 		MediaID:          mediaID,
 		MediaName:        mediaName,
@@ -7923,10 +7923,14 @@ func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID
 	}
 }
 
-func (b *TelegramBot) getPendingTransfer(chatID int64) (*PendingTransfer, bool) {
+func (b *TelegramBot) getPendingTransfer(chatID int64, messageID int) (*PendingTransfer, bool) {
 	b.transferMu.Lock()
 	defer b.transferMu.Unlock()
-	pending, ok := b.pendingTransfers[chatID]
+	chatPending, ok := b.pendingTransfers[chatID]
+	if !ok {
+		return nil, false
+	}
+	pending, ok := chatPending[messageID]
 	return pending, ok
 }
 
@@ -7942,11 +7946,12 @@ func (b *TelegramBot) clearPendingTransferByMessage(chatID int64, messageID int)
 	}
 	b.transferMu.Lock()
 	defer b.transferMu.Unlock()
-	pending, ok := b.pendingTransfers[chatID]
+	chatPending, ok := b.pendingTransfers[chatID]
 	if !ok {
 		return
 	}
-	if pending.MessageID == messageID {
+	delete(chatPending, messageID)
+	if len(chatPending) == 0 {
 		delete(b.pendingTransfers, chatID)
 	}
 }
@@ -7954,7 +7959,13 @@ func (b *TelegramBot) clearPendingTransferByMessage(chatID int64, messageID int)
 func (b *TelegramBot) setPendingArtistMode(chatID int64, artistID string, artistName string, storefront string, replyToID int, messageID int) {
 	b.artistModeMu.Lock()
 	defer b.artistModeMu.Unlock()
-	b.pendingArtistModes[chatID] = &PendingArtistMode{
+	if b.pendingArtistModes == nil {
+		b.pendingArtistModes = make(map[int64]map[int]*PendingArtistMode)
+	}
+	if b.pendingArtistModes[chatID] == nil {
+		b.pendingArtistModes[chatID] = make(map[int]*PendingArtistMode)
+	}
+	b.pendingArtistModes[chatID][messageID] = &PendingArtistMode{
 		ArtistID:         artistID,
 		ArtistName:       artistName,
 		Storefront:       storefront,
@@ -7964,10 +7975,14 @@ func (b *TelegramBot) setPendingArtistMode(chatID int64, artistID string, artist
 	}
 }
 
-func (b *TelegramBot) getPendingArtistMode(chatID int64) (*PendingArtistMode, bool) {
+func (b *TelegramBot) getPendingArtistMode(chatID int64, messageID int) (*PendingArtistMode, bool) {
 	b.artistModeMu.Lock()
 	defer b.artistModeMu.Unlock()
-	pending, ok := b.pendingArtistModes[chatID]
+	chatPending, ok := b.pendingArtistModes[chatID]
+	if !ok {
+		return nil, false
+	}
+	pending, ok := chatPending[messageID]
 	return pending, ok
 }
 
@@ -7983,11 +7998,12 @@ func (b *TelegramBot) clearPendingArtistModeByMessage(chatID int64, messageID in
 	}
 	b.artistModeMu.Lock()
 	defer b.artistModeMu.Unlock()
-	pending, ok := b.pendingArtistModes[chatID]
+	chatPending, ok := b.pendingArtistModes[chatID]
 	if !ok {
 		return
 	}
-	if pending.MessageID == messageID {
+	delete(chatPending, messageID)
+	if len(chatPending) == 0 {
 		delete(b.pendingArtistModes, chatID)
 	}
 }
