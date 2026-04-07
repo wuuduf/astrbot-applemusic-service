@@ -331,7 +331,16 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 
 // Remove boxes in the init segment that are known to cause compatibility issues
 func sanitizeInit(init *mp4.InitSegment) error {
+	if init == nil {
+		return errors.New("init segment is nil")
+	}
+	if init.Moov == nil {
+		return errors.New("moov box is missing")
+	}
 	traks := init.Moov.Traks
+	if len(traks) == 0 {
+		return errors.New("no track found")
+	}
 	if len(traks) > 1 {
 		return errors.New("more than 1 track found")
 	}
@@ -339,6 +348,9 @@ func sanitizeInit(init *mp4.InitSegment) error {
 	// like it when there's more than 1 entry in stsd.
 	// Every audio track contains two of these boxes because two IVs are needed to decrypt the
 	// track. The two boxes become identical after removing encryption info.
+	if traks[0].Mdia == nil || traks[0].Mdia.Minf == nil || traks[0].Mdia.Minf.Stbl == nil || traks[0].Mdia.Minf.Stbl.Stsd == nil {
+		return errors.New("stsd box is missing")
+	}
 	stsd := traks[0].Mdia.Minf.Stbl.Stsd
 	if stsd.SampleCount == 1 {
 		return nil
@@ -347,6 +359,9 @@ func sanitizeInit(init *mp4.InitSegment) error {
 		return fmt.Errorf("expected only 1 or 2 entries in stsd, got %d", stsd.SampleCount)
 	}
 	children := stsd.Children
+	if len(children) < 2 {
+		return fmt.Errorf("invalid stsd entries: expected >=2, got %d", len(children))
+	}
 	if children[0].Type() != children[1].Type() {
 		return errors.New("children in stsd are not of the same type")
 	}
@@ -479,16 +494,28 @@ func FilterSbgpSgpd(children []mp4.Box) ([]mp4.Box, uint64) {
 
 // Get decryption info for tracks from init segment and remove encryption-related boxes
 func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, error) {
+	if init == nil {
+		return nil, errors.New("init segment is nil")
+	}
+	if init.Moov == nil {
+		return nil, errors.New("moov box is missing")
+	}
+	if len(init.Moov.Traks) == 0 {
+		return nil, errors.New("no track found")
+	}
 	di, err := mp4.DecryptInit(init)
+	if err != nil {
+		return nil, err
+	}
 	tracks := make(map[uint32]mp4.DecryptTrackInfo, len(di.TrackInfos))
 	for _, ti := range di.TrackInfos {
 		tracks[ti.TrackID] = ti
 	}
-	if err != nil {
-		return tracks, err
-	}
 	// remove encryption-related sbgp and sgpd
 	for _, trak := range init.Moov.Traks {
+		if trak.Mdia == nil || trak.Mdia.Minf == nil || trak.Mdia.Minf.Stbl == nil {
+			continue
+		}
 		stbl := trak.Mdia.Minf.Stbl
 		stbl.Children, _ = FilterSbgpSgpd(stbl.Children)
 	}

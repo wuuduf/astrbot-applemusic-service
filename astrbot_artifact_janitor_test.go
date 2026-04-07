@@ -106,6 +106,40 @@ func TestAstrBotArtifactJanitorRemovesExpired(t *testing.T) {
 	t.Fatalf("expected janitor to remove expired file")
 }
 
+func TestAstrBotArtifactCleanupQuotaIncludesNestedFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	nestedDir := filepath.Join(root, "lyrics-album-001")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatalf("mkdir nested dir failed: %v", err)
+	}
+	rootPath := writeSizedFileForTest(t, root, "root.txt", 40)
+	nestedPath := writeSizedFileForTest(t, nestedDir, "nested.txt", 80)
+
+	now := time.Now()
+	mustChtimes(t, rootPath, now.Add(-10*time.Minute))
+	mustChtimes(t, nestedPath, now.Add(-20*time.Minute))
+
+	svc := &astrbotAPIService{
+		artifactRoot: root,
+		artifactPolicy: artifactPolicy{
+			maxAge:     0,
+			maxBytes:   50,
+			protectAge: 0,
+		},
+		artifactState: artifactState{
+			activeArtifactIO: make(map[string]int),
+		},
+	}
+
+	stats := svc.cleanupArtifactsAt(now)
+	if stats.RemovedByQuota == 0 {
+		t.Fatalf("expected quota cleanup to remove nested files")
+	}
+	assertFileMissing(t, nestedPath)
+	assertFileExists(t, rootPath)
+}
+
 func writeSizedFileForTest(t *testing.T, dir string, name string, size int) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

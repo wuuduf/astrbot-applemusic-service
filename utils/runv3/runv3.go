@@ -214,34 +214,46 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	var urlBuilder strings.Builder
 	if listType == m3u8.MEDIA {
 		mediaPlaylist := from.(*m3u8.MediaPlaylist)
-		if mediaPlaylist.Key != nil {
-			split := strings.Split(mediaPlaylist.Key.URI, ",")
-			uriPrefix = split[0]
-			kidbase64 = split[1]
-			lastSlashIndex := strings.LastIndex(b, "/")
-			// 截取最后一个斜杠之前的部分
-			urlBuilder.WriteString(b[:lastSlashIndex])
-			urlBuilder.WriteString("/")
-			urlBuilder.WriteString(mediaPlaylist.Map.URI)
-			//fileurl = b[:lastSlashIndex] + "/" + mediaPlaylist.Map.URI
-			//fmt.Println("Extracted URI:", mediaPlaylist.Map.URI)
-			if mvmode {
-				for _, segment := range mediaPlaylist.Segments {
-					if segment != nil {
-						//fmt.Println("Extracted URI:", segment.URI)
-						urlBuilder.WriteString(";")
-						urlBuilder.WriteString(b[:lastSlashIndex])
-						urlBuilder.WriteString("/")
-						urlBuilder.WriteString(segment.URI)
-						//fileurl = fileurl + ";" + b[:lastSlashIndex] + "/" + segment.URI
-					}
+		if mediaPlaylist.Key == nil {
+			return "", "", "", errors.New("no key information found")
+		}
+		keyURI := strings.TrimSpace(mediaPlaylist.Key.URI)
+		parts := strings.SplitN(keyURI, ",", 2)
+		if len(parts) != 2 {
+			return "", "", "", fmt.Errorf("invalid key uri: %s", keyURI)
+		}
+		uriPrefix = strings.TrimSpace(parts[0])
+		kidbase64 = strings.TrimSpace(parts[1])
+		if uriPrefix == "" || kidbase64 == "" {
+			return "", "", "", fmt.Errorf("invalid key uri: %s", keyURI)
+		}
+		if mediaPlaylist.Map == nil || strings.TrimSpace(mediaPlaylist.Map.URI) == "" {
+			return "", "", "", errors.New("init segment uri is missing")
+		}
+		lastSlashIndex := strings.LastIndex(b, "/")
+		if lastSlashIndex < 0 {
+			return "", "", "", fmt.Errorf("invalid playlist url: %s", b)
+		}
+		baseURL := b[:lastSlashIndex]
+		urlBuilder.WriteString(baseURL)
+		urlBuilder.WriteString("/")
+		urlBuilder.WriteString(mediaPlaylist.Map.URI)
+		if mvmode {
+			for _, segment := range mediaPlaylist.Segments {
+				if segment == nil || strings.TrimSpace(segment.URI) == "" {
+					continue
 				}
+				urlBuilder.WriteString(";")
+				urlBuilder.WriteString(baseURL)
+				urlBuilder.WriteString("/")
+				urlBuilder.WriteString(segment.URI)
 			}
-		} else {
-			fmt.Println("No key information found")
 		}
 	} else {
-		fmt.Println("Not a media playlist")
+		return "", "", "", errors.New("not a media playlist")
+	}
+	if urlBuilder.Len() == 0 {
+		return "", "", "", errors.New("media playlist did not contain downloadable uris")
 	}
 	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
@@ -529,22 +541,30 @@ func downloadSegment(
 }
 
 // fileWriter 从 Channel 接收分段并按顺序写入文件
-func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.Writer, totalSegments int) {
+func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.Writer, totalSegments int, errCh chan<- error) {
 	defer wg.Done()
 
 	// 缓冲区，用于存放乱序到达的分段
 	// key 是分段序号，value 是分段数据
 	segmentBuffer := make(map[int][]byte)
 	nextIndex := 0 // 期望写入的下一个分段的序号
+	var writeErr error
+
+	recordWriteErr := func(index int, err error) {
+		if err == nil {
+			return
+		}
+		if writeErr == nil {
+			writeErr = fmt.Errorf("写入分段 %d 失败: %w", index, err)
+		}
+	}
 
 	for segment := range segmentsChan {
 		// 检查收到的分段是否是当前期望的
 		if segment.Index == nextIndex {
 			//fmt.Printf("写入分段 %d\n", segment.Index)
 			_, err := outputFile.Write(segment.Data)
-			if err != nil {
-				fmt.Printf("错误(分段 %d): 写入文件失败: %v\n", segment.Index, err)
-			}
+			recordWriteErr(segment.Index, err)
 			nextIndex++
 
 			// 检查缓冲区中是否有下一个连续的分段
@@ -556,9 +576,7 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 
 				//fmt.Printf("从缓冲区写入分段 %d\n", nextIndex)
 				_, err := outputFile.Write(data)
-				if err != nil {
-					fmt.Printf("错误(分段 %d): 从缓冲区写入文件失败: %v\n", nextIndex, err)
-				}
+				recordWriteErr(nextIndex, err)
 				// 从缓冲区删除已写入的分段，释放内存
 				delete(segmentBuffer, nextIndex)
 				nextIndex++
@@ -571,9 +589,10 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 	}
 
 	// 确保所有分段都已写入
-	if nextIndex != totalSegments {
-		fmt.Printf("警告: 写入完成，但似乎有分段丢失。期望 %d 个, 实际写入 %d 个。\n", totalSegments, nextIndex)
+	if nextIndex != totalSegments && writeErr == nil {
+		writeErr = fmt.Errorf("写入完成但分段不完整: 期望 %d, 实际 %d", totalSegments, nextIndex)
 	}
+	errCh <- writeErr
 }
 
 func ExtMvData(keyAndUrls string, savePath string) error {
@@ -591,6 +610,7 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 
 	var downloadWg, writerWg sync.WaitGroup
 	segmentsChan := make(chan Segment, len(urls))
+	writerErrCh := make(chan error, 1)
 	// --- 新增代码: 定义最大并发数 ---
 	const maxConcurrency = 10
 	// --- 新增代码: 创建带缓冲的 Channel 作为信号量 ---
@@ -614,7 +634,7 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 
 	// 启动写入 Goroutine
 	writerWg.Add(1)
-	go fileWriter(&writerWg, segmentsChan, barWriter, len(urls))
+	go fileWriter(&writerWg, segmentsChan, barWriter, len(urls), writerErrCh)
 
 	// 启动下载 Goroutines
 	for i, url := range urls {
@@ -636,6 +656,9 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 
 	// 等待写入 Goroutine 完成所有写入和缓冲处理
 	writerWg.Wait()
+	if writerErr := <-writerErrCh; writerErr != nil {
+		return writerErr
+	}
 
 	success, failed := stats.snapshotFailed()
 	if success != len(urls) {

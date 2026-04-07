@@ -170,24 +170,32 @@ func (s *astrbotAPIService) cleanupArtifactsAt(now time.Time) artifactCleanupSta
 }
 
 func (s *astrbotAPIService) collectArtifactEntries() ([]artifactEntry, error) {
-	entries, err := os.ReadDir(s.artifactRoot)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]artifactEntry, 0, len(entries))
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			continue
+	result := []artifactEntry{}
+	err := filepath.WalkDir(s.artifactRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		path := filepath.Join(s.artifactRoot, entry.Name())
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
 		result = append(result, artifactEntry{
 			path:    path,
 			size:    info.Size(),
 			modTime: info.ModTime(),
-			isDir:   info.IsDir(),
+			isDir:   false,
 			active:  s.isArtifactIOActive(path),
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
