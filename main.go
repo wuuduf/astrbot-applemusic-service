@@ -2811,7 +2811,7 @@ type TelegramBot struct {
 	chatSettings map[int64]ChatDownloadSettings
 
 	pendingMu sync.Mutex
-	pending   map[int64]*PendingSelection
+	pending   map[int64]map[int]*PendingSelection
 
 	transferMu       sync.Mutex
 	pendingTransfers map[int64]*PendingTransfer
@@ -3189,7 +3189,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		searchLimit:        searchLimit,
 		maxFileBytes:       maxFileBytes,
 		chatSettings:       make(map[int64]ChatDownloadSettings),
-		pending:            make(map[int64]*PendingSelection),
+		pending:            make(map[int64]map[int]*PendingSelection),
 		pendingTransfers:   make(map[int64]*PendingTransfer),
 		pendingArtistModes: make(map[int64]*PendingArtistMode),
 		downloadQueue:      make(chan *downloadRequest, queueSize),
@@ -5495,17 +5495,14 @@ func (b *TelegramBot) fetchSearchPage(kind string, query string, offset int) ([]
 }
 
 func (b *TelegramBot) handleSelection(chatID int64, messageID int, choice int) {
-	pending, ok := b.getPending(chatID)
+	pending, ok := b.getPending(chatID, messageID)
 	if !ok {
 		_ = b.sendMessage(chatID, "No active selection. Start with /search.", nil)
 		return
 	}
-	if pending.ResultsMessageID != 0 && messageID != pending.ResultsMessageID {
-		return
-	}
 	replyToID := pending.ReplyToMessageID
 	if time.Since(pending.CreatedAt) > pendingTTL {
-		b.clearPending(chatID)
+		b.clearPendingByMessage(chatID, messageID)
 		_ = b.sendMessageWithReply(chatID, "Selection expired. Please search again.", nil, replyToID)
 		return
 	}
@@ -5519,7 +5516,7 @@ func (b *TelegramBot) handleSelection(chatID int64, messageID int, choice int) {
 		storefront = Config.Storefront
 	}
 	// Selection confirmed: remove the search list message and clear pending state.
-	b.clearPending(chatID)
+	b.clearPendingByMessage(chatID, messageID)
 	_ = b.deleteMessage(chatID, messageID)
 	switch pending.Kind {
 	case "song":
@@ -5611,11 +5608,8 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 }
 
 func (b *TelegramBot) handlePage(chatID int64, messageID int, delta int) {
-	pending, ok := b.getPending(chatID)
+	pending, ok := b.getPending(chatID, messageID)
 	if !ok {
-		return
-	}
-	if pending.ResultsMessageID != messageID {
 		return
 	}
 	if pending.Query == "" {
@@ -7862,7 +7856,13 @@ func (b *TelegramBot) isAllowedChat(chatID int64) bool {
 func (b *TelegramBot) setPending(chatID int64, kind string, query string, storefront string, offset int, items []apputils.SearchResultItem, hasNext bool, replyToID int, resultsMessageID int, title string) {
 	b.pendingMu.Lock()
 	defer b.pendingMu.Unlock()
-	b.pending[chatID] = &PendingSelection{
+	if b.pending == nil {
+		b.pending = make(map[int64]map[int]*PendingSelection)
+	}
+	if b.pending[chatID] == nil {
+		b.pending[chatID] = make(map[int]*PendingSelection)
+	}
+	b.pending[chatID][resultsMessageID] = &PendingSelection{
 		Kind:             kind,
 		Query:            query,
 		Title:            title,
@@ -7876,10 +7876,14 @@ func (b *TelegramBot) setPending(chatID int64, kind string, query string, storef
 	}
 }
 
-func (b *TelegramBot) getPending(chatID int64) (*PendingSelection, bool) {
+func (b *TelegramBot) getPending(chatID int64, messageID int) (*PendingSelection, bool) {
 	b.pendingMu.Lock()
 	defer b.pendingMu.Unlock()
-	pending, ok := b.pending[chatID]
+	chatPending, ok := b.pending[chatID]
+	if !ok {
+		return nil, false
+	}
+	pending, ok := chatPending[messageID]
 	return pending, ok
 }
 
@@ -7895,11 +7899,12 @@ func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
 	}
 	b.pendingMu.Lock()
 	defer b.pendingMu.Unlock()
-	pending, ok := b.pending[chatID]
+	chatPending, ok := b.pending[chatID]
 	if !ok {
 		return
 	}
-	if pending.ResultsMessageID == messageID {
+	delete(chatPending, messageID)
+	if len(chatPending) == 0 {
 		delete(b.pending, chatID)
 	}
 }

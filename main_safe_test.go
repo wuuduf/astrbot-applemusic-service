@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/task"
@@ -111,5 +112,39 @@ func TestParseTelegramRetryAfterFromDescription(t *testing.T) {
 	}
 	if got != 7*time.Second {
 		t.Fatalf("expected 7s, got %s", got)
+	}
+}
+
+func TestPendingSelectionIsolatedByMessageID(t *testing.T) {
+	chatID := int64(1001)
+	b := &TelegramBot{
+		pending: make(map[int64]map[int]*PendingSelection),
+	}
+
+	b.setPending(chatID, "song", "q1", "us", 0, []apputils.SearchResultItem{{ID: "s1"}}, false, 11, 101, "")
+	b.setPending(chatID, "song", "q2", "us", 0, []apputils.SearchResultItem{{ID: "s2"}}, false, 12, 102, "")
+
+	pending1, ok := b.getPending(chatID, 101)
+	if !ok {
+		t.Fatalf("expected pending for message 101")
+	}
+	if pending1.Query != "q1" || pending1.ReplyToMessageID != 11 {
+		t.Fatalf("unexpected pending1: %+v", pending1)
+	}
+
+	pending2, ok := b.getPending(chatID, 102)
+	if !ok {
+		t.Fatalf("expected pending for message 102")
+	}
+	if pending2.Query != "q2" || pending2.ReplyToMessageID != 12 {
+		t.Fatalf("unexpected pending2: %+v", pending2)
+	}
+
+	b.clearPendingByMessage(chatID, 101)
+	if _, ok := b.getPending(chatID, 101); ok {
+		t.Fatalf("message 101 pending should be cleared")
+	}
+	if _, ok := b.getPending(chatID, 102); !ok {
+		t.Fatalf("message 102 pending should remain")
 	}
 }
