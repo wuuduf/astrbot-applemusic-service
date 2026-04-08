@@ -579,6 +579,112 @@ func TestStopDownloadWorkersWaitsForRunningTask(t *testing.T) {
 	}
 }
 
+func TestNextLocalMidnight(t *testing.T) {
+	loc := time.FixedZone("UTC+8", 8*3600)
+	now := time.Date(2026, time.April, 8, 23, 59, 59, 0, loc)
+	got := nextLocalMidnight(now)
+	want := time.Date(2026, time.April, 9, 0, 0, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Fatalf("nextLocalMidnight mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestTelegramDailyRestartEnabledDefaultsAndOverride(t *testing.T) {
+	original := Config.TelegramDailyRestartEnabled
+	defer func() {
+		Config.TelegramDailyRestartEnabled = original
+	}()
+
+	Config.TelegramDailyRestartEnabled = nil
+	if !telegramDailyRestartEnabled() {
+		t.Fatalf("expected daily restart enabled by default")
+	}
+
+	disabled := false
+	Config.TelegramDailyRestartEnabled = &disabled
+	if telegramDailyRestartEnabled() {
+		t.Fatalf("expected daily restart disabled when configured false")
+	}
+
+	enabled := true
+	Config.TelegramDailyRestartEnabled = &enabled
+	if !telegramDailyRestartEnabled() {
+		t.Fatalf("expected daily restart enabled when configured true")
+	}
+}
+
+func TestResolveTelegramErrorLogFile(t *testing.T) {
+	t.Setenv("AMDL_TELEGRAM_ERROR_LOG_FILE", "")
+	cacheFile := filepath.Join(string(filepath.Separator), "tmp", "telegram-cache.json")
+	stateFile := filepath.Join(string(filepath.Separator), "tmp", "state", "telegram.state.json")
+	got := resolveTelegramErrorLogFile(cacheFile, stateFile)
+	want := filepath.Clean(filepath.Join(filepath.Dir(stateFile), defaultTelegramErrorLogFile))
+	if got != want {
+		t.Fatalf("resolveTelegramErrorLogFile mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestResolveTelegramErrorLogFileRespectsEnv(t *testing.T) {
+	custom := filepath.Join("custom", "telegram-errors.log")
+	t.Setenv("AMDL_TELEGRAM_ERROR_LOG_FILE", custom)
+	got := resolveTelegramErrorLogFile("telegram-cache.json", "")
+	if got != filepath.Clean(custom) {
+		t.Fatalf("expected env override %q, got %q", filepath.Clean(custom), got)
+	}
+}
+
+func TestAppendRuntimeErrorLogWritesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "telegram-error.log")
+	oldPath := currentRuntimeErrorLogPath()
+	setRuntimeErrorLogPath(logPath)
+	defer setRuntimeErrorLogPath(oldPath)
+
+	appendRuntimeErrorLog("runtime failure")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read runtime error log failed: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "runtime failure") {
+		t.Fatalf("expected runtime failure in log content, got %q", text)
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat runtime error log failed: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("expected private log permissions, got %o", info.Mode().Perm())
+	}
+}
+
+func TestTelegramLoopReturnsAfterConsecutiveGetUpdatesErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &TelegramBot{
+		token:                   "test-token",
+		apiBase:                 "http://127.0.0.1:1",
+		client:                  &http.Client{Timeout: 30 * time.Millisecond},
+		pollClient:              &http.Client{Timeout: 30 * time.Millisecond},
+		shutdownCtx:             ctx,
+		shutdownCancel:          cancel,
+		getUpdatesErrorDelay:    1 * time.Millisecond,
+		getUpdatesConflictDelay: 1 * time.Millisecond,
+		getUpdatesRestartAfter:  3,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.loop()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("telegram loop did not stop after consecutive getUpdates errors")
+	}
+}
+
 func jsonMarshalIndentForTest(v any) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
 }

@@ -77,6 +77,7 @@ func (b *TelegramBot) startStateSaver() {
 					runWithRecovery("telegram saveRuntimeStateNow", nil, func() {
 						if err := b.saveRuntimeStateNow(); err != nil {
 							fmt.Printf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
+							appendRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
 						}
 					})
 				case <-stopCh:
@@ -93,6 +94,7 @@ func (b *TelegramBot) stopStateSaver() {
 	}
 	if err := b.saveRuntimeStateNow(); err != nil {
 		fmt.Printf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
+		appendRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
 	}
 	stopCh := b.stateStop
 	close(stopCh)
@@ -348,6 +350,7 @@ func (b *TelegramBot) restoreRuntimeState() {
 	if err != nil {
 		if !os.IsNotExist(err) {
 			fmt.Printf("telegram runtime state load failed: %v\n", err)
+			appendRuntimeErrorLogf("telegram runtime state load failed: %v", err)
 		}
 		return
 	}

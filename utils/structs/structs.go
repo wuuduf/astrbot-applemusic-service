@@ -57,6 +57,7 @@ type ConfigSet struct {
 	TelegramAPIURL                    string  `yaml:"telegram-api-url"`
 	TelegramHTTPTimeoutSec            int     `yaml:"telegram-http-timeout-sec"`
 	TelegramPollTimeoutSec            int     `yaml:"telegram-poll-timeout-sec"`
+	TelegramDailyRestartEnabled       *bool   `yaml:"telegram-daily-restart-enabled"`
 	TelegramProxyURL                  string  `yaml:"telegram-proxy-url"`
 	TelegramNoProxy                   bool    `yaml:"telegram-no-proxy"`
 	TelegramMetricsIntervalSec        int     `yaml:"telegram-metrics-interval-sec"`

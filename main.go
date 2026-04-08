@@ -44,24 +44,26 @@ import (
 )
 
 var (
-	forbiddenNames    = regexp.MustCompile(`[/\\<>:"|?*]`)
-	retryAfterJSONRe  = regexp.MustCompile(`(?i)"retry_after"\s*:\s*(\d+)`)
-	retryAfterTextRe  = regexp.MustCompile(`(?i)retry\s+after\s+(\d+)`)
-	mediaIDNumericRe  = regexp.MustCompile(`^\d+$`)
-	mediaIDPlaylistRe = regexp.MustCompile(`^pl\.[A-Za-z0-9-]+$`)
-	mediaIDStationRe  = regexp.MustCompile(`^ra\.[A-Za-z0-9-]+$`)
-	mediaIDGenericRe  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	artist_select     bool
-	debug_mode        bool
-	alac_max          *int
-	atmos_max         *int
-	mv_max            *int
-	mv_audio_type     *string
-	aac_type          *string
-	Config            structs.ConfigSet
-	searchMetaMu      sync.Mutex
-	searchMetaByID    = make(map[string]AudioMeta)
-	networkHTTPClient = &http.Client{Timeout: 45 * time.Second}
+	forbiddenNames      = regexp.MustCompile(`[/\\<>:"|?*]`)
+	retryAfterJSONRe    = regexp.MustCompile(`(?i)"retry_after"\s*:\s*(\d+)`)
+	retryAfterTextRe    = regexp.MustCompile(`(?i)retry\s+after\s+(\d+)`)
+	mediaIDNumericRe    = regexp.MustCompile(`^\d+$`)
+	mediaIDPlaylistRe   = regexp.MustCompile(`^pl\.[A-Za-z0-9-]+$`)
+	mediaIDStationRe    = regexp.MustCompile(`^ra\.[A-Za-z0-9-]+$`)
+	mediaIDGenericRe    = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	artist_select       bool
+	debug_mode          bool
+	alac_max            *int
+	atmos_max           *int
+	mv_max              *int
+	mv_audio_type       *string
+	aac_type            *string
+	Config              structs.ConfigSet
+	searchMetaMu        sync.Mutex
+	searchMetaByID      = make(map[string]AudioMeta)
+	networkHTTPClient   = &http.Client{Timeout: 45 * time.Second}
+	runtimeErrorLogMu   sync.Mutex
+	runtimeErrorLogPath atomic.Value
 )
 
 const maxMediaIDLength = 128
@@ -266,6 +268,100 @@ func loadConfig() error {
 		Config.Storefront = "us"
 	}
 	return nil
+}
+
+func nextLocalMidnight(now time.Time) time.Time {
+	current := now
+	if current.IsZero() {
+		current = time.Now()
+	}
+	loc := current.Location()
+	year, month, day := current.In(loc).Date()
+	return time.Date(year, month, day+1, 0, 0, 0, 0, loc)
+}
+
+func telegramDailyRestartEnabled() bool {
+	if Config.TelegramDailyRestartEnabled == nil {
+		return true
+	}
+	return *Config.TelegramDailyRestartEnabled
+}
+
+func resolveTelegramErrorLogFile(cacheFile string, stateFile string) string {
+	if raw := strings.TrimSpace(os.Getenv("AMDL_TELEGRAM_ERROR_LOG_FILE")); raw != "" {
+		return filepath.Clean(raw)
+	}
+	stateFile = strings.TrimSpace(stateFile)
+	if stateFile == "" {
+		stateFile = resolveTelegramStateFile(strings.TrimSpace(cacheFile))
+	}
+	if strings.TrimSpace(stateFile) == "" {
+		return defaultTelegramErrorLogFile
+	}
+	dir := filepath.Dir(filepath.Clean(stateFile))
+	if strings.TrimSpace(dir) == "" || dir == "." {
+		return defaultTelegramErrorLogFile
+	}
+	return filepath.Clean(filepath.Join(dir, defaultTelegramErrorLogFile))
+}
+
+func setRuntimeErrorLogPath(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		runtimeErrorLogPath.Store("")
+		return
+	}
+	runtimeErrorLogPath.Store(filepath.Clean(path))
+}
+
+func currentRuntimeErrorLogPath() string {
+	value := runtimeErrorLogPath.Load()
+	if value == nil {
+		return ""
+	}
+	path, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(path)
+}
+
+func appendRuntimeErrorLog(message string) {
+	path := currentRuntimeErrorLogPath()
+	message = strings.TrimSpace(message)
+	if path == "" || message == "" {
+		return
+	}
+	runtimeErrorLogMu.Lock()
+	defer runtimeErrorLogMu.Unlock()
+
+	if err := ensureNonSymlinkRegularFile(path); err != nil {
+		fmt.Printf("telegram error log write skipped (%s): %v\n", path, err)
+		return
+	}
+	if _, err := ensureCacheDirectory(path); err != nil {
+		fmt.Printf("telegram error log write skipped (%s): %v\n", path, err)
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, telegramCacheFilePerm)
+	if err != nil {
+		fmt.Printf("telegram error log write skipped (%s): %v\n", path, err)
+		return
+	}
+	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), message)
+	if _, err := file.WriteString(line); err != nil {
+		fmt.Printf("telegram error log write skipped (%s): %v\n", path, err)
+	}
+	if err := file.Close(); err != nil {
+		fmt.Printf("telegram error log close failed (%s): %v\n", path, err)
+	}
+	if err := os.Chmod(path, telegramCacheFilePerm); err != nil && !os.IsPermission(err) {
+		fmt.Printf("telegram error log chmod failed (%s): %v\n", path, err)
+	}
+}
+
+func appendRuntimeErrorLogf(format string, args ...any) {
+	appendRuntimeErrorLog(fmt.Sprintf(format, args...))
 }
 
 func setSearchMeta(trackID string, title string, performer string) {
@@ -1429,37 +1525,42 @@ func extractVideoWithConfig(c string, cfg structs.ConfigSet) (string, error) {
 }
 
 const (
-	defaultSearchLimit                 = 8
-	defaultQueueSize                   = 20
-	defaultTaskWorkerLimit             = 1
-	maxTaskWorkerLimit                 = 4
-	downloadWorkerPoolSize             = 4
-	pendingTTL                         = 10 * time.Minute
-	defaultTelegramFormat              = "alac"
-	defaultTelegramAACType             = "aac-lc"
-	defaultTelegramMVAudioType         = "atmos"
-	defaultTelegramLyricsFormat        = "lrc"
-	defaultTelegramDownloadMaxGB       = 3
-	defaultTelegramCleanupInterval     = 5 * time.Minute
-	defaultTelegramCleanupScanInterval = 30 * time.Minute
-	defaultTelegramCleanupProtectAge   = 2 * time.Minute
-	defaultTelegramHTTPTimeout         = 180 * time.Second
-	defaultTelegramPollTimeout         = 75 * time.Second
-	defaultTelegramStateFile           = "telegram-state.json"
-	defaultTelegramMetricsInterval     = 60 * time.Second
-	defaultTelegramResourceCheck       = 30 * time.Second
-	defaultTelegramMinFreeDiskMB       = 512
-	defaultTelegramMinFreeTmpMB        = 256
-	defaultTelegramSendGlobalInterval  = 150 * time.Millisecond
-	defaultTelegramSendChatInterval    = 800 * time.Millisecond
-	defaultTelegramLanguage            = "zh"
-	telegramAutoDeleteAfter            = 2 * time.Minute
-	minTelegramPollTimeout             = 35 * time.Second
-	telegramDialTimeout                = 20 * time.Second
-	telegramTLSHandshakeTimeout        = 30 * time.Second
-	uploadNoProgressTimeout            = 120 * time.Second
-	uploadWatchdogInterval             = 5 * time.Second
-	uploadProgressBufferSize           = 32 * 1024
+	defaultSearchLimit                        = 8
+	defaultQueueSize                          = 20
+	defaultTaskWorkerLimit                    = 1
+	maxTaskWorkerLimit                        = 4
+	downloadWorkerPoolSize                    = 4
+	pendingTTL                                = 10 * time.Minute
+	defaultTelegramFormat                     = "alac"
+	defaultTelegramAACType                    = "aac-lc"
+	defaultTelegramMVAudioType                = "atmos"
+	defaultTelegramLyricsFormat               = "lrc"
+	defaultTelegramDownloadMaxGB              = 3
+	defaultTelegramCleanupInterval            = 5 * time.Minute
+	defaultTelegramCleanupScanInterval        = 30 * time.Minute
+	defaultTelegramCleanupProtectAge          = 2 * time.Minute
+	defaultTelegramHTTPTimeout                = 180 * time.Second
+	defaultTelegramPollTimeout                = 75 * time.Second
+	defaultTelegramStateFile                  = "telegram-state.json"
+	defaultTelegramMetricsInterval            = 60 * time.Second
+	defaultTelegramResourceCheck              = 30 * time.Second
+	defaultTelegramMinFreeDiskMB              = 512
+	defaultTelegramMinFreeTmpMB               = 256
+	defaultTelegramSendGlobalInterval         = 150 * time.Millisecond
+	defaultTelegramSendChatInterval           = 800 * time.Millisecond
+	defaultTelegramLanguage                   = "zh"
+	defaultTelegramErrorLogFile               = "telegram-error.log"
+	defaultTelegramLoopRestartDelay           = 2 * time.Second
+	defaultTelegramGetUpdatesErrorSleep       = 2 * time.Second
+	defaultTelegramGetUpdatesConflictSleep    = 5 * time.Second
+	defaultTelegramGetUpdatesRestartThreshold = 30
+	telegramAutoDeleteAfter                   = 2 * time.Minute
+	minTelegramPollTimeout                    = 35 * time.Second
+	telegramDialTimeout                       = 20 * time.Second
+	telegramTLSHandshakeTimeout               = 30 * time.Second
+	uploadNoProgressTimeout                   = 120 * time.Second
+	uploadWatchdogInterval                    = 5 * time.Second
+	uploadProgressBufferSize                  = 32 * 1024
 )
 
 const (
@@ -1574,6 +1675,11 @@ type TelegramBot struct {
 	allowedChats map[int64]bool
 	searchLimit  int
 	maxFileBytes int64
+	errorLogFile string
+
+	getUpdatesErrorDelay    time.Duration
+	getUpdatesConflictDelay time.Duration
+	getUpdatesRestartAfter  int
 
 	settingsMu   sync.Mutex
 	chatSettings map[int64]ChatDownloadSettings
@@ -1846,11 +1952,73 @@ func runTelegramBot(appleToken string) {
 		return
 	}
 	sharedstorage.ApplyTelegramStorageOverrides(&Config)
-
-	bot := newTelegramBot(botToken, appleToken)
 	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
-	defer func() {
+
+	for {
+		bot := newTelegramBot(botToken, appleToken)
+		setRuntimeErrorLogPath(bot.errorLogFile)
+		fmt.Println("Telegram bot started. Waiting for updates...")
+		fmt.Printf("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)\n", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
+		fmt.Printf("Telegram runtime error log: %s\n", bot.errorLogFile)
+
+		dailyRestartEnabled := telegramDailyRestartEnabled()
+		var restartTimer *time.Timer
+		var restartCh <-chan time.Time
+		if dailyRestartEnabled {
+			restartAt := nextLocalMidnight(time.Now())
+			untilRestart := time.Until(restartAt)
+			if untilRestart <= 0 {
+				untilRestart = time.Second
+			}
+			restartTimer = time.NewTimer(untilRestart)
+			restartCh = restartTimer.C
+			fmt.Printf("Telegram daily auto-restart scheduled at %s\n", restartAt.Format(time.RFC3339))
+		} else {
+			fmt.Println("Telegram daily auto-restart disabled by config.")
+		}
+
+		loopDone := make(chan struct{})
+		go func() {
+			defer close(loopDone)
+			bot.loopWithAutoRestart()
+		}()
+
+		reason := "loop-exit"
+		select {
+		case <-signalCtx.Done():
+			reason = "signal"
+			fmt.Println("Telegram bot shutdown requested.")
+		case <-restartCh:
+			reason = "daily-restart"
+			fmt.Println("Telegram daily auto-restart triggered.")
+		case <-loopDone:
+			if bot.isShuttingDown() {
+				reason = "shutdown"
+			} else {
+				reason = "loop-exit"
+				fmt.Println("Telegram loop stopped unexpectedly. Restarting bot runtime.")
+			}
+		}
+		if restartTimer != nil {
+			if !restartTimer.Stop() {
+				select {
+				case <-restartTimer.C:
+				default:
+				}
+			}
+		}
+
+		bot.requestShutdown()
+		closeHTTPIdleConnections(bot.pollClient)
+		closeHTTPIdleConnections(bot.client)
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+			fmt.Println("Telegram bot shutdown timed out waiting for polling loop to stop.")
+			appendRuntimeErrorLog("telegram bot shutdown timed out waiting for polling loop to stop")
+		}
+
 		bot.stopDownloadWorkers()
 		bot.clearAllAutoDeleteMessages()
 		if bot.cleanupTracker != nil {
@@ -1861,27 +2029,22 @@ func runTelegramBot(appleToken string) {
 		}
 		bot.stopMetricsReporter()
 		bot.stopStateSaver()
-	}()
-	fmt.Println("Telegram bot started. Waiting for updates...")
-	fmt.Printf("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)\n", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
-	loopDone := make(chan struct{})
-	go func() {
-		defer close(loopDone)
-		bot.loopWithAutoRestart()
-	}()
 
-	select {
-	case <-signalCtx.Done():
-		fmt.Println("Telegram bot shutdown requested.")
-		bot.requestShutdown()
-		closeHTTPIdleConnections(bot.pollClient)
-		closeHTTPIdleConnections(bot.client)
-		select {
-		case <-loopDone:
-		case <-time.After(5 * time.Second):
-			fmt.Println("Telegram bot shutdown timed out waiting for polling loop to stop.")
+		switch reason {
+		case "signal":
+			return
+		case "daily-restart":
+			continue
+		case "shutdown":
+			appendRuntimeErrorLog("telegram bot loop stopped after shutdown request; restarting runtime")
+		default:
+			appendRuntimeErrorLog("telegram bot loop stopped unexpectedly; restarting runtime")
 		}
-	case <-loopDone:
+		select {
+		case <-signalCtx.Done():
+			return
+		case <-time.After(defaultTelegramLoopRestartDelay):
+		}
 	}
 }
 
@@ -1896,6 +2059,7 @@ func panicErrorWithStack(scope string, rec any) error {
 func logRecoveredPanic(scope string, rec any) error {
 	err := panicErrorWithStack(scope, rec)
 	fmt.Println(err.Error())
+	appendRuntimeErrorLog(err.Error())
 	return err
 }
 
@@ -1917,7 +2081,6 @@ func runWithRecovery(scope string, onPanic func(error), fn func()) (panicked boo
 }
 
 func (b *TelegramBot) loopWithAutoRestart() {
-	const restartDelay = 2 * time.Second
 	for {
 		if b.isShuttingDown() {
 			return
@@ -1931,15 +2094,37 @@ func (b *TelegramBot) loopWithAutoRestart() {
 		if b.isShuttingDown() {
 			return
 		}
-		fmt.Printf("telegram loop recovered from panic, restarting in %s\n", restartDelay)
+		fmt.Printf("telegram loop recovered from panic, restarting in %s\n", defaultTelegramLoopRestartDelay)
+		appendRuntimeErrorLogf("telegram loop recovered from panic; restarting in %s", defaultTelegramLoopRestartDelay)
 		closeHTTPIdleConnections(b.pollClient)
 		closeHTTPIdleConnections(b.client)
 		select {
 		case <-b.shutdownContext().Done():
 			return
-		case <-time.After(restartDelay):
+		case <-time.After(defaultTelegramLoopRestartDelay):
 		}
 	}
+}
+
+func (b *TelegramBot) getUpdatesErrorSleep() time.Duration {
+	if b != nil && b.getUpdatesErrorDelay > 0 {
+		return b.getUpdatesErrorDelay
+	}
+	return defaultTelegramGetUpdatesErrorSleep
+}
+
+func (b *TelegramBot) getUpdatesConflictSleep() time.Duration {
+	if b != nil && b.getUpdatesConflictDelay > 0 {
+		return b.getUpdatesConflictDelay
+	}
+	return defaultTelegramGetUpdatesConflictSleep
+}
+
+func (b *TelegramBot) getUpdatesRestartThreshold() int {
+	if b != nil && b.getUpdatesRestartAfter > 0 {
+		return b.getUpdatesRestartAfter
+	}
+	return defaultTelegramGetUpdatesRestartThreshold
 }
 
 func normalizeTelegramAPIBase(raw string) string {
@@ -2181,6 +2366,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	if cacheFile == "" {
 		cacheFile = "telegram-cache.json"
 	}
+	stateFile := resolveTelegramStateFile(cacheFile)
 	queueSize := defaultQueueSize
 	if queueSize <= 0 {
 		queueSize = 1
@@ -2201,33 +2387,37 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	proxyFunc, proxyInfo := resolveTelegramProxy()
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	bot := &TelegramBot{
-		token:              token,
-		apiBase:            apiBase,
-		proxyInfo:          proxyInfo,
-		appleToken:         appleToken,
-		client:             newTelegramHTTPClient(apiTimeout, proxyFunc),
-		pollClient:         newTelegramHTTPClient(pollTimeout, proxyFunc),
-		allowedChats:       allowed,
-		searchLimit:        searchLimit,
-		maxFileBytes:       maxFileBytes,
-		chatSettings:       make(map[int64]ChatDownloadSettings),
-		pending:            make(map[int64]map[int]*PendingSelection),
-		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
-		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
-		downloadQueue:      make(chan *downloadRequest, queueSize),
-		workerLimit:        defaultTaskWorkerLimit,
-		cacheFile:          cacheFile,
-		stateFile:          resolveTelegramStateFile(cacheFile),
-		cache:              make(map[string]CachedAudio),
-		docCache:           make(map[string]CachedDocument),
-		videoCache:         make(map[string]CachedVideo),
-		inflightDownloads:  make(map[string]struct{}),
-		activeRequests:     make(map[string]telegramPersistedRequest),
-		autoDeleteMessages: make(map[string]*time.Timer),
-		autoDeleteSticky:   make(map[string]bool),
-		sendLimiter:        newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
-		shutdownCtx:        shutdownCtx,
-		shutdownCancel:     shutdownCancel,
+		token:                   token,
+		apiBase:                 apiBase,
+		proxyInfo:               proxyInfo,
+		appleToken:              appleToken,
+		client:                  newTelegramHTTPClient(apiTimeout, proxyFunc),
+		pollClient:              newTelegramHTTPClient(pollTimeout, proxyFunc),
+		allowedChats:            allowed,
+		searchLimit:             searchLimit,
+		maxFileBytes:            maxFileBytes,
+		errorLogFile:            resolveTelegramErrorLogFile(cacheFile, stateFile),
+		getUpdatesErrorDelay:    defaultTelegramGetUpdatesErrorSleep,
+		getUpdatesConflictDelay: defaultTelegramGetUpdatesConflictSleep,
+		getUpdatesRestartAfter:  defaultTelegramGetUpdatesRestartThreshold,
+		chatSettings:            make(map[int64]ChatDownloadSettings),
+		pending:                 make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:        make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes:      make(map[int64]map[int]*PendingArtistMode),
+		downloadQueue:           make(chan *downloadRequest, queueSize),
+		workerLimit:             defaultTaskWorkerLimit,
+		cacheFile:               cacheFile,
+		stateFile:               stateFile,
+		cache:                   make(map[string]CachedAudio),
+		docCache:                make(map[string]CachedDocument),
+		videoCache:              make(map[string]CachedVideo),
+		inflightDownloads:       make(map[string]struct{}),
+		activeRequests:          make(map[string]telegramPersistedRequest),
+		autoDeleteMessages:      make(map[string]*time.Timer),
+		autoDeleteSticky:        make(map[string]bool),
+		sendLimiter:             newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
+		shutdownCtx:             shutdownCtx,
+		shutdownCancel:          shutdownCancel,
 	}
 	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.loadCache()
@@ -2260,10 +2450,13 @@ func (b *TelegramBot) loop() {
 		if b.isShuttingDown() {
 			return
 		}
-		fmt.Println("startup drop-pending-updates failed:", sanitizeTelegramError(err, b.token))
+		msg := sanitizeTelegramError(err, b.token)
+		fmt.Println("startup drop-pending-updates failed:", msg)
+		appendRuntimeErrorLogf("startup drop-pending-updates failed: %s", msg)
 	}
 	offset := b.consumePendingUpdatesOnStart()
 	lastConflictHint := time.Time{}
+	consecutiveErrors := 0
 	for {
 		if b.isShuttingDown() {
 			return
@@ -2273,20 +2466,28 @@ func (b *TelegramBot) loop() {
 			if b.isShuttingDown() {
 				return
 			}
+			consecutiveErrors++
 			msg := sanitizeTelegramError(err, b.token)
 			fmt.Println("getUpdates error:", msg)
+			appendRuntimeErrorLogf("getUpdates error (consecutive=%d): %s", consecutiveErrors, msg)
+			if threshold := b.getUpdatesRestartThreshold(); threshold > 0 && consecutiveErrors >= threshold {
+				fmt.Printf("getUpdates hit %d consecutive errors, restarting bot runtime.\n", consecutiveErrors)
+				appendRuntimeErrorLogf("getUpdates hit %d consecutive errors; restarting bot runtime", consecutiveErrors)
+				return
+			}
 			lower := strings.ToLower(msg)
 			if strings.Contains(lower, "409") || strings.Contains(lower, "conflict") {
 				if lastConflictHint.IsZero() || time.Since(lastConflictHint) > 30*time.Second {
 					fmt.Println("Hint: 409 Conflict means another getUpdates consumer is active (another bot process) or webhook is set. Keep only one bot instance and clear webhook if needed.")
 					lastConflictHint = time.Now()
 				}
-				time.Sleep(5 * time.Second)
+				time.Sleep(b.getUpdatesConflictSleep())
 				continue
 			}
-			time.Sleep(2 * time.Second)
+			time.Sleep(b.getUpdatesErrorSleep())
 			continue
 		}
+		consecutiveErrors = 0
 		for _, upd := range updates {
 			if upd.UpdateID >= offset {
 				offset = upd.UpdateID + 1
@@ -2367,7 +2568,9 @@ func (b *TelegramBot) consumePendingUpdatesOnStart() int {
 	for {
 		updates, err := b.getUpdatesWithOptions(offset, 0, 100)
 		if err != nil {
-			fmt.Println("startup pending-update check failed:", sanitizeTelegramError(err, b.token))
+			msg := sanitizeTelegramError(err, b.token)
+			fmt.Println("startup pending-update check failed:", msg)
+			appendRuntimeErrorLogf("startup pending-update check failed: %s", msg)
 			return offset
 		}
 		if len(updates) == 0 {
@@ -5339,7 +5542,9 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 			cacheKey = b.bundleZipCacheKey(mediaType, mediaID, settings)
 		}
 		if err := b.sendDocumentFile(chatID, zipPath, displayName, replyToID, status, cacheKey); err != nil {
-			fmt.Println("send ZIP error:", sanitizeTelegramError(err, b.token))
+			sanitized := sanitizeTelegramError(err, b.token)
+			fmt.Println("send ZIP error:", sanitized)
+			appendRuntimeErrorLogf("send ZIP error (%s:%s): %s", mediaType, mediaID, sanitized)
 			if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
 				status.UpdateSync("ZIP exceeds Telegram limit, fallback to one-by-one transfer.", 0, 0)
 			} else {
@@ -5359,7 +5564,9 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 			break
 		}
 		if err := b.sendDownloadedPathWithRetry(session, chatID, path, replyToID, status, settings); err != nil {
-			fmt.Printf("send file error (%s): %s\n", path, sanitizeTelegramError(err, b.token))
+			sanitized := sanitizeTelegramError(err, b.token)
+			fmt.Printf("send file error (%s): %s\n", path, sanitized)
+			appendRuntimeErrorLogf("send file error (%s): %s", path, sanitized)
 			status.Update(fmt.Sprintf("Failed to send %s: %v", filepath.Base(path), err), 0, 0)
 			continue
 		}

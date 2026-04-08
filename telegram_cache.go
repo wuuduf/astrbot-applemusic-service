@@ -149,10 +149,12 @@ func (b *TelegramBot) saveCacheLocked() {
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		fmt.Printf("telegram cache save failed (%s, marshal): %v\n", target, err)
+		appendRuntimeErrorLogf("telegram cache save failed (%s, marshal): %v", target, err)
 		return
 	}
 	if err := atomicWriteTelegramCacheFile(target, data); err != nil {
 		fmt.Printf("telegram cache save failed (%s, atomic write): %v\n", target, err)
+		appendRuntimeErrorLogf("telegram cache save failed (%s, atomic write): %v", target, err)
 	}
 }
 

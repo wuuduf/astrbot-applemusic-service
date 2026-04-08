@@ -146,6 +146,7 @@ Notes:
 4. Optional: tune Telegram network timeout:
    - `telegram-http-timeout-sec` for send/edit/upload requests (default `180`)
    - `telegram-poll-timeout-sec` for `getUpdates` long polling (default `75`, must be `> 30`)
+   - `telegram-daily-restart-enabled` for local-midnight auto restart (default `true`)
 5. Optional: control Telegram proxy behavior:
    - `telegram-proxy-url` to force a specific proxy (for example `http://127.0.0.1:7890`)
    - `telegram-no-proxy=true` to force direct connection (ignore env proxy)

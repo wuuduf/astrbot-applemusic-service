@@ -105,6 +105,7 @@ docker run --rm -it \
 4. 可选：按网络情况调整超时：
    - `telegram-http-timeout-sec`：发送/编辑/上传请求超时（默认 `180`）
    - `telegram-poll-timeout-sec`：`getUpdates` 长轮询超时（默认 `75`，必须大于 `30`）
+   - `telegram-daily-restart-enabled`：是否启用本地时区每日 0 点自动重启（默认 `true`）
 5. 可选：代理控制（上传慢/节点异常时很有用）：
    - `telegram-proxy-url`：显式指定 Telegram 代理（例如 `http://127.0.0.1:7890`）
    - `telegram-no-proxy`：设为 `true` 可强制直连（忽略环境变量代理）
