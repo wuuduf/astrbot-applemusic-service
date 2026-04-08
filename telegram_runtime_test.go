@@ -87,7 +87,7 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 		},
 		inflightDownloads: map[string]struct{}{"k1": {}},
 		chatSettings: map[int64]ChatDownloadSettings{
-			1: {Format: telegramFormatAlac, SettingsInited: true},
+			1: {Format: telegramFormatAlac, Language: telegramLanguageEn, SettingsInited: true},
 		},
 	}
 
@@ -106,6 +106,9 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 	}
 	if len(loaded.InflightKeys) != 1 || loaded.InflightKeys[0] != "k1" {
 		t.Fatalf("expected inflight keys derived from requests, got %+v", loaded.InflightKeys)
+	}
+	if loaded.ChatSettings[1].Language != telegramLanguageEn {
+		t.Fatalf("expected persisted chat language to be en, got %+v", loaded.ChatSettings[1])
 	}
 }
 

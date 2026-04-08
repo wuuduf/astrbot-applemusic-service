@@ -1290,6 +1290,7 @@ func (b *TelegramBot) sendMessageWithReply(chatID int64, text string, markup any
 }
 
 func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, markup any, replyToID int) (int, error) {
+	text = b.localizeOutgoingText(chatID, text)
 	payload := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
@@ -1328,6 +1329,7 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 		b.noteTelegramRateLimit(err)
 		return 0, err
 	}
+	b.scheduleAutoDeleteMessage(chatID, apiResp.Result.MessageID, b.shouldMarkAutoDeleteSticky(markup))
 	return apiResp.Result.MessageID, nil
 }
 

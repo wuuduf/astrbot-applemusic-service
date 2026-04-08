@@ -1174,6 +1174,91 @@ func TestBuildTrackSelectionStage(t *testing.T) {
 	}
 }
 
+func TestNormalizeChatSettingsDefaultLanguage(t *testing.T) {
+	normalized := normalizeChatSettings(ChatDownloadSettings{})
+	if normalized.Language != telegramLanguageZh {
+		t.Fatalf("expected default language zh, got %q", normalized.Language)
+	}
+}
+
+func TestSetChatLanguage(t *testing.T) {
+	b := &TelegramBot{chatSettings: make(map[int64]ChatDownloadSettings)}
+	settings := b.setChatLanguage(1001, telegramLanguageEn)
+	if settings.Language != telegramLanguageEn {
+		t.Fatalf("expected language to be en, got %q", settings.Language)
+	}
+}
+
+func TestBuildTransferKeyboardLocalizedAndCross(t *testing.T) {
+	zh := buildTransferKeyboard(telegramLanguageZh)
+	if got := zh.InlineKeyboard[0][0].Text; got != "逐个发送" {
+		t.Fatalf("expected zh one-by-one label, got %q", got)
+	}
+	if got := zh.InlineKeyboard[1][0].Text; got != "❌" {
+		t.Fatalf("expected cross cancel button, got %q", got)
+	}
+
+	en := buildTransferKeyboard(telegramLanguageEn)
+	if got := en.InlineKeyboard[0][0].Text; got != "Transfer one by one" {
+		t.Fatalf("expected en one-by-one label, got %q", got)
+	}
+	if got := en.InlineKeyboard[1][0].Text; got != "❌" {
+		t.Fatalf("expected cross cancel button, got %q", got)
+	}
+}
+
+func TestBuildInlineKeyboardLocalizedAndCross(t *testing.T) {
+	zh := buildInlineKeyboard(1, true, true, telegramLanguageZh)
+	if got := zh.InlineKeyboard[1][0].Text; got != "上一页" {
+		t.Fatalf("expected zh prev label, got %q", got)
+	}
+	if got := zh.InlineKeyboard[2][0].Text; got != "❌" {
+		t.Fatalf("expected cross cancel button, got %q", got)
+	}
+
+	en := buildInlineKeyboard(1, true, true, telegramLanguageEn)
+	if got := en.InlineKeyboard[1][0].Text; got != "Prev" {
+		t.Fatalf("expected en prev label, got %q", got)
+	}
+	if got := en.InlineKeyboard[2][0].Text; got != "❌" {
+		t.Fatalf("expected cross cancel button, got %q", got)
+	}
+}
+
+func TestLocalizeOutgoingTextUsagePrefix(t *testing.T) {
+	b := &TelegramBot{
+		chatSettings: map[int64]ChatDownloadSettings{
+			1001: {Language: telegramLanguageZh, SettingsInited: true},
+		},
+	}
+	got := b.localizeOutgoingText(1001, "Usage: /settings <value>")
+	if got != "用法：/settings <value>" {
+		t.Fatalf("unexpected localized usage text: %q", got)
+	}
+}
+
+func TestAutoDeleteStickyInteractionCancelsTimer(t *testing.T) {
+	b := &TelegramBot{
+		autoDeleteMessages: make(map[string]*time.Timer),
+		autoDeleteSticky:   make(map[string]bool),
+	}
+	b.scheduleAutoDeleteMessage(1001, 42, true)
+	key := autoDeleteKey(1001, 42)
+	b.autoDeleteMu.Lock()
+	_, existsBefore := b.autoDeleteMessages[key]
+	b.autoDeleteMu.Unlock()
+	if !existsBefore {
+		t.Fatalf("expected scheduled auto-delete timer")
+	}
+	b.markMessageInteraction(1001, 42)
+	b.autoDeleteMu.Lock()
+	_, existsAfter := b.autoDeleteMessages[key]
+	b.autoDeleteMu.Unlock()
+	if existsAfter {
+		t.Fatalf("expected sticky timer to be removed after interaction")
+	}
+}
+
 func TestNormalizeMediaIdentifierRejectsTraversal(t *testing.T) {
 	t.Parallel()
 	if _, err := normalizeMediaIdentifier(mediaTypeMusicVideo, "../12345"); err == nil {

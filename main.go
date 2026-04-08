@@ -1452,6 +1452,8 @@ const (
 	defaultTelegramMinFreeTmpMB        = 256
 	defaultTelegramSendGlobalInterval  = 150 * time.Millisecond
 	defaultTelegramSendChatInterval    = 800 * time.Millisecond
+	defaultTelegramLanguage            = "zh"
+	telegramAutoDeleteAfter            = 2 * time.Minute
 	minTelegramPollTimeout             = 35 * time.Second
 	telegramDialTimeout                = 20 * time.Second
 	telegramTLSHandshakeTimeout        = 30 * time.Second
@@ -1467,6 +1469,11 @@ const (
 	telegramFormatAtmos  = "atmos"
 	transferModeOneByOne = "one"
 	transferModeZip      = "zip"
+)
+
+const (
+	telegramLanguageZh = "zh"
+	telegramLanguageEn = "en"
 )
 
 const (
@@ -1494,6 +1501,7 @@ type ChatDownloadSettings struct {
 	AACType        string
 	MVAudioType    string
 	LyricsFormat   string
+	Language       string
 	SongZip        bool
 	AutoLyrics     bool
 	AutoCover      bool
@@ -1615,6 +1623,10 @@ type TelegramBot struct {
 	resourceGuard *telegramResourceGuard
 
 	cleanupTracker *telegramCleanupTracker
+
+	autoDeleteMu       sync.Mutex
+	autoDeleteMessages map[string]*time.Timer
+	autoDeleteSticky   map[string]bool
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -1840,6 +1852,7 @@ func runTelegramBot(appleToken string) {
 	defer stopSignal()
 	defer func() {
 		bot.stopDownloadWorkers()
+		bot.clearAllAutoDeleteMessages()
 		if bot.cleanupTracker != nil {
 			bot.cleanupTracker.stop()
 		}
@@ -2210,6 +2223,8 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		videoCache:         make(map[string]CachedVideo),
 		inflightDownloads:  make(map[string]struct{}),
 		activeRequests:     make(map[string]telegramPersistedRequest),
+		autoDeleteMessages: make(map[string]*time.Timer),
+		autoDeleteSticky:   make(map[string]bool),
 		sendLimiter:        newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
 		shutdownCtx:        shutdownCtx,
 		shutdownCancel:     shutdownCancel,
@@ -2555,6 +2570,17 @@ func normalizeTelegramLyricsFormat(value string) string {
 	}
 }
 
+func normalizeTelegramLanguage(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case telegramLanguageZh, "cn", "zh-cn", "chinese", "中文":
+		return telegramLanguageZh
+	case telegramLanguageEn, "en-us", "english":
+		return telegramLanguageEn
+	default:
+		return ""
+	}
+}
+
 func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 	normalizedFormat := normalizeTelegramFormat(settings.Format)
 	if normalizedFormat == "" {
@@ -2581,6 +2607,13 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 	if lyricsFormat == "" {
 		lyricsFormat = defaultTelegramLyricsFormat
 	}
+	language := normalizeTelegramLanguage(settings.Language)
+	if language == "" {
+		language = normalizeTelegramLanguage(defaultTelegramLanguage)
+	}
+	if language == "" {
+		language = telegramLanguageZh
+	}
 	songZip := settings.SongZip
 	autoLyrics := settings.AutoLyrics
 	autoCover := settings.AutoCover
@@ -2596,12 +2629,17 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 		AACType:        aacType,
 		MVAudioType:    mvAudioType,
 		LyricsFormat:   lyricsFormat,
+		Language:       language,
 		SongZip:        songZip,
 		AutoLyrics:     autoLyrics,
 		AutoCover:      autoCover,
 		AutoAnimated:   autoAnimated,
 		SettingsInited: true,
 	}
+}
+
+func (b *TelegramBot) getChatLanguage(chatID int64) string {
+	return b.getChatSettings(chatID).Language
 }
 
 func (b *TelegramBot) getChatSettings(chatID int64) ChatDownloadSettings {
@@ -2678,6 +2716,17 @@ func (b *TelegramBot) setChatLyricsFormat(chatID int64, lyricsFormat string) Cha
 	})
 }
 
+func (b *TelegramBot) setChatLanguage(chatID int64, language string) ChatDownloadSettings {
+	normalized := normalizeTelegramLanguage(language)
+	if normalized == "" {
+		return b.getChatSettings(chatID)
+	}
+	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
+		current.Language = normalized
+		return current
+	})
+}
+
 func (b *TelegramBot) toggleChatAutoLyrics(chatID int64) ChatDownloadSettings {
 	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
 		current.AutoLyrics = !current.AutoLyrics
@@ -2719,9 +2768,9 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 		if !b.isAllowedChat(msg.Chat.ID) {
 			// Allow querying chat_id even when not in allowlist.
 			if cmd == "id" && len(args) == 0 {
-				_ = b.sendMessage(msg.Chat.ID, formatChatIDText(msg.Chat.ID), nil)
+				_ = b.sendMessage(msg.Chat.ID, b.formatChatIDTextForChat(msg.Chat.ID), nil)
 			} else {
-				_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.", nil)
+				_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
 			}
 			return
 		}
@@ -2729,7 +2778,7 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 		return
 	}
 	if !b.isAllowedChat(msg.Chat.ID) {
-		_ = b.sendMessage(msg.Chat.ID, "Not authorized for this bot.", nil)
+		_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
 		return
 	}
 	urlText := extractFirstAppleMusicURL(text)
@@ -2738,7 +2787,7 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 	}
 	target, err := parseAppleMusicURL(urlText)
 	if err != nil {
-		_ = b.sendMessageWithReply(msg.Chat.ID, fmt.Sprintf("Unsupported Apple Music URL: %s", urlText), nil, msg.MessageID)
+		_ = b.sendMessageWithReply(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, fmt.Sprintf("Unsupported Apple Music URL: %s", urlText)), nil, msg.MessageID)
 		return
 	}
 	b.handleURLTarget(msg.Chat.ID, msg.MessageID, target)
@@ -2751,6 +2800,7 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	if !b.isAllowedChat(cb.Message.Chat.ID) {
 		return
 	}
+	b.markMessageInteraction(cb.Message.Chat.ID, cb.Message.MessageID)
 	data := strings.TrimSpace(cb.Data)
 	if data == "panel_cancel" || data == "setting_exit" || data == "setting_close" {
 		b.cancelPanelAndDelete(cb.Message.Chat.ID, cb.Message.MessageID)
@@ -2777,6 +2827,10 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if strings.HasPrefix(data, "setting_lyrics_format:") {
 		lyricsFormat := strings.TrimPrefix(data, "setting_lyrics_format:")
 		settings := b.setChatLyricsFormat(cb.Message.Chat.ID, lyricsFormat)
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
+	} else if strings.HasPrefix(data, "setting_lang:") {
+		language := strings.TrimPrefix(data, "setting_lang:")
+		settings := b.setChatLanguage(cb.Message.Chat.ID, language)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if data == "setting_auto:lyrics" {
 		settings := b.toggleChatAutoLyrics(cb.Message.Chat.ID)
@@ -2826,7 +2880,7 @@ func (b *TelegramBot) cancelPanelAndDelete(chatID int64, messageID int) {
 	b.clearPendingTransferByMessage(chatID, messageID)
 	b.clearPendingArtistModeByMessage(chatID, messageID)
 	if err := b.deleteMessage(chatID, messageID); err != nil {
-		_ = b.editMessageText(chatID, messageID, "已取消。", nil)
+		_ = b.editMessageText(chatID, messageID, b.localizeOutgoingText(chatID, "已取消。"), nil)
 	}
 }
 
@@ -2888,7 +2942,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 	cmd = normalizeTelegramBotCommand(cmd)
 	switch cmd {
 	case "start", "help":
-		_ = b.sendMessage(chatID, botHelpText(), nil)
+		_ = b.sendMessage(chatID, b.botHelpTextForChat(chatID), nil)
 	case "search_song":
 		b.handleSearch(chatID, "song", strings.Join(args, " "), replyToID)
 	case "search_album":
@@ -2976,7 +3030,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 		}
 	case "id":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, formatChatIDText(chatID), nil)
+			_ = b.sendMessage(chatID, b.formatChatIDTextForChat(chatID), nil)
 			return
 		}
 		if len(args) == 1 {
@@ -3064,6 +3118,11 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
+			if language := normalizeTelegramLanguage(raw); language != "" {
+				settings = b.setChatLanguage(chatID, language)
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
+				return
+			}
 			if workerLimit, ok := parseTaskWorkerLimit(raw); ok {
 				b.setTaskWorkerLimit(workerLimit)
 				settings = b.getChatSettings(chatID)
@@ -3130,14 +3189,14 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
-			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip|worker1..worker4]", nil, replyToID)
+			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|zh|en|lyrics|cover|animated|songzip|worker1..worker4]", nil, replyToID)
 			return
 		}
 		settings := b.getChatSettings(chatID)
 		_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 	default:
 		if strings.EqualFold(strings.TrimSpace(chatType), "private") {
-			_ = b.sendMessage(chatID, "Unknown command. Send /help for usage.", nil)
+			_ = b.sendMessage(chatID, b.localizeOutgoingText(chatID, "Unknown command. Send /help for usage."), nil)
 		}
 		return
 	}
@@ -4219,7 +4278,7 @@ func (b *TelegramBot) startArtistSelection(chatID int64, artistID string, artist
 		artistName = "artist " + artistID
 	}
 	message := fmt.Sprintf("Choose what to browse from %s:", artistName)
-	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildArtistModeKeyboard(), replyToID)
+	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildArtistModeKeyboard(b.getChatLanguage(chatID)), replyToID)
 	if err != nil {
 		return
 	}
@@ -4274,7 +4333,7 @@ func (b *TelegramBot) handleArtistModeSelection(chatID int64, messageID int, rel
 		_ = b.sendMessageWithReply(chatID, "No content found for this artist.", nil, replyToID)
 		return
 	}
-	resultMessageID, err := b.sendMessageWithReplyReturn(chatID, text, buildInlineKeyboard(len(items), false, hasNext), replyToID)
+	resultMessageID, err := b.sendMessageWithReplyReturn(chatID, text, buildInlineKeyboard(len(items), false, hasNext, b.getChatLanguage(chatID)), replyToID)
 	if err != nil {
 		return
 	}
@@ -4304,7 +4363,7 @@ func (b *TelegramBot) handleSearch(chatID int64, kind string, query string, repl
 		return
 	}
 	message := apputils.FormatSearchResults(kind, query, items)
-	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildInlineKeyboard(len(items), offset > 0, hasNext), replyToID)
+	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildInlineKeyboard(len(items), offset > 0, hasNext, b.getChatLanguage(chatID)), replyToID)
 	if err != nil {
 		return
 	}
@@ -4511,7 +4570,7 @@ func (b *TelegramBot) handlePage(chatID int64, messageID int, delta int) {
 	default:
 		return
 	}
-	_ = b.editMessageText(chatID, messageID, message, buildInlineKeyboard(len(items), newOffset > 0, hasNext))
+	_ = b.editMessageText(chatID, messageID, message, buildInlineKeyboard(len(items), newOffset > 0, hasNext, b.getChatLanguage(chatID)))
 	b.setPending(chatID, pending.Kind, pending.Query, pending.Storefront, newOffset, items, hasNext, pending.ReplyToMessageID, messageID, pending.Title)
 }
 
@@ -4887,7 +4946,7 @@ func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaI
 	} else if mediaType == mediaTypeArtistAsset {
 		message = "Choose artist assets export method:"
 	}
-	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildTransferKeyboard(), replyToID)
+	messageID, err := b.sendMessageWithReplyReturn(chatID, message, buildTransferKeyboard(b.getChatLanguage(chatID)), replyToID)
 	if err != nil {
 		return
 	}
@@ -5710,6 +5769,7 @@ func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, 
 	if messageID == 0 {
 		return nil
 	}
+	text = b.localizeOutgoingText(chatID, text)
 	payload := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
@@ -5771,6 +5831,7 @@ func (b *TelegramBot) deleteMessage(chatID int64, messageID int) error {
 	if messageID == 0 {
 		return nil
 	}
+	b.clearAutoDeleteMessage(chatID, messageID)
 	payload := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
@@ -6066,7 +6127,7 @@ func parseCommand(text string) (string, []string, bool) {
 	return strings.ToLower(cmd), parts[1:], true
 }
 
-func buildInlineKeyboard(count int, hasPrev bool, hasNext bool) InlineKeyboardMarkup {
+func buildInlineKeyboard(count int, hasPrev bool, hasNext bool, lang string) InlineKeyboardMarkup {
 	rowSize := 4
 	rows := [][]InlineKeyboardButton{}
 	row := []InlineKeyboardButton{}
@@ -6084,15 +6145,21 @@ func buildInlineKeyboard(count int, hasPrev bool, hasNext bool) InlineKeyboardMa
 		rows = append(rows, row)
 	}
 	navRow := []InlineKeyboardButton{}
+	prevText := "上一页"
+	nextText := "下一页"
+	if lang == telegramLanguageEn {
+		prevText = "Prev"
+		nextText = "Next"
+	}
 	if hasPrev {
 		navRow = append(navRow, InlineKeyboardButton{
-			Text:         "Prev",
+			Text:         prevText,
 			CallbackData: "page:-1",
 		})
 	}
 	if hasNext {
 		navRow = append(navRow, InlineKeyboardButton{
-			Text:         "Next",
+			Text:         nextText,
 			CallbackData: "page:1",
 		})
 	}
@@ -6100,36 +6167,46 @@ func buildInlineKeyboard(count int, hasPrev bool, hasNext bool) InlineKeyboardMa
 		rows = append(rows, navRow)
 	}
 	rows = append(rows, []InlineKeyboardButton{
-		{Text: "取消并删除", CallbackData: "panel_cancel"},
+		{Text: "❌", CallbackData: "panel_cancel"},
 	})
 	return InlineKeyboardMarkup{
 		InlineKeyboard: rows,
 	}
 }
 
-func buildTransferKeyboard() InlineKeyboardMarkup {
+func buildTransferKeyboard(lang string) InlineKeyboardMarkup {
+	oneByOneText := "逐个发送"
+	if lang == telegramLanguageEn {
+		oneByOneText = "Transfer one by one"
+	}
 	return InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "Transfer one by one", CallbackData: "transfer:one"},
+				{Text: oneByOneText, CallbackData: "transfer:one"},
 				{Text: "ZIP", CallbackData: "transfer:zip"},
 			},
 			{
-				{Text: "取消并删除", CallbackData: "panel_cancel"},
+				{Text: "❌", CallbackData: "panel_cancel"},
 			},
 		},
 	}
 }
 
-func buildArtistModeKeyboard() InlineKeyboardMarkup {
+func buildArtistModeKeyboard(lang string) InlineKeyboardMarkup {
+	albumsText := "专辑"
+	musicVideosText := "音乐视频"
+	if lang == telegramLanguageEn {
+		albumsText = "Albums"
+		musicVideosText = "Music Videos"
+	}
 	return InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "Albums", CallbackData: "artist_rel:albums"},
-				{Text: "Music Videos", CallbackData: "artist_rel:music-videos"},
+				{Text: albumsText, CallbackData: "artist_rel:albums"},
+				{Text: musicVideosText, CallbackData: "artist_rel:music-videos"},
 			},
 			{
-				{Text: "取消并删除", CallbackData: "panel_cancel"},
+				{Text: "❌", CallbackData: "panel_cancel"},
 			},
 		},
 	}
@@ -6144,12 +6221,30 @@ func settingButtonText(label string, active bool) string {
 
 func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 	normalized := normalizeChatSettings(settings)
-	songTransfer := "one-by-one"
+	lang := normalized.Language
+	songTransfer := "逐个发送"
 	if normalized.SongZip {
-		songTransfer = "zip"
+		songTransfer = "ZIP"
 	}
 	workers := b.getTaskWorkerLimit()
-	return fmt.Sprintf("Download settings:\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Auto extra: lyrics=%t cover=%t animated=%t",
+	if lang == telegramLanguageEn {
+		songTransfer = "one-by-one"
+		if normalized.SongZip {
+			songTransfer = "ZIP"
+		}
+		return fmt.Sprintf("Download settings:\n- Language: English\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Auto extra: lyrics=%t cover=%t animated=%t",
+			strings.ToUpper(normalized.Format),
+			normalized.AACType,
+			normalized.MVAudioType,
+			strings.ToUpper(normalized.LyricsFormat),
+			songTransfer,
+			workers,
+			normalized.AutoLyrics,
+			normalized.AutoCover,
+			normalized.AutoAnimated,
+		)
+	}
+	return fmt.Sprintf("下载设置：\n- 语言：中文\n- 格式：%s\n- AAC 类型：%s\n- MV 音频：%s\n- 歌词格式：%s\n- 歌曲发送：%s\n- 任务线程（全局）：%d\n- 自动附加：歌词=%t 封面=%t 动态封面=%t",
 		strings.ToUpper(normalized.Format),
 		normalized.AACType,
 		normalized.MVAudioType,
@@ -6164,11 +6259,38 @@ func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 
 func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) InlineKeyboardMarkup {
 	normalized := normalizeChatSettings(settings)
+	lang := normalized.Language
 	format := normalized.Format
 	aacType := normalized.AACType
 	mvAudioType := normalized.MVAudioType
 	lyricsFormat := normalized.LyricsFormat
 	workers := b.getTaskWorkerLimit()
+	binauralLabel := "Binaural"
+	downmixLabel := "Downmix"
+	mvAtmosLabel := "MV Atmos"
+	mvAC3Label := "MV AC3"
+	mvAACLabel := "MV AAC"
+	lyricsLRCLabel := "Lyrics LRC"
+	lyricsTTMLLabel := "Lyrics TTML"
+	songZIPLabel := "Song ZIP"
+	autoLyricsLabel := "Auto Lyrics"
+	autoCoverLabel := "Auto Cover"
+	autoAnimatedLabel := "Auto Animated"
+	workerLabel := "Worker"
+	if lang != telegramLanguageEn {
+		binauralLabel = "双耳"
+		downmixLabel = "下混"
+		mvAtmosLabel = "MV Atmos"
+		mvAC3Label = "MV AC3"
+		mvAACLabel = "MV AAC"
+		lyricsLRCLabel = "歌词 LRC"
+		lyricsTTMLLabel = "歌词 TTML"
+		songZIPLabel = "歌曲 ZIP"
+		autoLyricsLabel = "自动歌词"
+		autoCoverLabel = "自动封面"
+		autoAnimatedLabel = "自动动态封面"
+		workerLabel = "线程"
+	}
 	return InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
@@ -6184,36 +6306,40 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 				{Text: settingButtonText("AAC", aacType == "aac"), CallbackData: "setting_aac:aac"},
 			},
 			{
-				{Text: settingButtonText("Binaural", aacType == "aac-binaural"), CallbackData: "setting_aac:aac-binaural"},
-				{Text: settingButtonText("Downmix", aacType == "aac-downmix"), CallbackData: "setting_aac:aac-downmix"},
+				{Text: settingButtonText(binauralLabel, aacType == "aac-binaural"), CallbackData: "setting_aac:aac-binaural"},
+				{Text: settingButtonText(downmixLabel, aacType == "aac-downmix"), CallbackData: "setting_aac:aac-downmix"},
 			},
 			{
-				{Text: settingButtonText("MV Atmos", mvAudioType == "atmos"), CallbackData: "setting_mv_audio:atmos"},
-				{Text: settingButtonText("MV AC3", mvAudioType == "ac3"), CallbackData: "setting_mv_audio:ac3"},
-				{Text: settingButtonText("MV AAC", mvAudioType == "aac"), CallbackData: "setting_mv_audio:aac"},
+				{Text: settingButtonText(mvAtmosLabel, mvAudioType == "atmos"), CallbackData: "setting_mv_audio:atmos"},
+				{Text: settingButtonText(mvAC3Label, mvAudioType == "ac3"), CallbackData: "setting_mv_audio:ac3"},
+				{Text: settingButtonText(mvAACLabel, mvAudioType == "aac"), CallbackData: "setting_mv_audio:aac"},
 			},
 			{
-				{Text: settingButtonText("Lyrics LRC", lyricsFormat == "lrc"), CallbackData: "setting_lyrics_format:lrc"},
-				{Text: settingButtonText("Lyrics TTML", lyricsFormat == "ttml"), CallbackData: "setting_lyrics_format:ttml"},
+				{Text: settingButtonText(lyricsLRCLabel, lyricsFormat == "lrc"), CallbackData: "setting_lyrics_format:lrc"},
+				{Text: settingButtonText(lyricsTTMLLabel, lyricsFormat == "ttml"), CallbackData: "setting_lyrics_format:ttml"},
 			},
 			{
-				{Text: settingButtonText("Song ZIP", normalized.SongZip), CallbackData: "setting_song_zip"},
+				{Text: settingButtonText("中文", lang == telegramLanguageZh), CallbackData: "setting_lang:zh"},
+				{Text: settingButtonText("English", lang == telegramLanguageEn), CallbackData: "setting_lang:en"},
 			},
 			{
-				{Text: settingButtonText("线程 1", workers == 1), CallbackData: "setting_worker:1"},
-				{Text: settingButtonText("线程 2", workers == 2), CallbackData: "setting_worker:2"},
+				{Text: settingButtonText(songZIPLabel, normalized.SongZip), CallbackData: "setting_song_zip"},
 			},
 			{
-				{Text: settingButtonText("线程 3", workers == 3), CallbackData: "setting_worker:3"},
-				{Text: settingButtonText("线程 4", workers == 4), CallbackData: "setting_worker:4"},
+				{Text: settingButtonText(fmt.Sprintf("%s 1", workerLabel), workers == 1), CallbackData: "setting_worker:1"},
+				{Text: settingButtonText(fmt.Sprintf("%s 2", workerLabel), workers == 2), CallbackData: "setting_worker:2"},
 			},
 			{
-				{Text: settingButtonText("Auto Lyrics", normalized.AutoLyrics), CallbackData: "setting_auto:lyrics"},
-				{Text: settingButtonText("Auto Cover", normalized.AutoCover), CallbackData: "setting_auto:cover"},
-				{Text: settingButtonText("Auto Animated", normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
+				{Text: settingButtonText(fmt.Sprintf("%s 3", workerLabel), workers == 3), CallbackData: "setting_worker:3"},
+				{Text: settingButtonText(fmt.Sprintf("%s 4", workerLabel), workers == 4), CallbackData: "setting_worker:4"},
 			},
 			{
-				{Text: "取消并删除", CallbackData: "panel_cancel"},
+				{Text: settingButtonText(autoLyricsLabel, normalized.AutoLyrics), CallbackData: "setting_auto:lyrics"},
+				{Text: settingButtonText(autoCoverLabel, normalized.AutoCover), CallbackData: "setting_auto:cover"},
+				{Text: settingButtonText(autoAnimatedLabel, normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
+			},
+			{
+				{Text: "❌", CallbackData: "panel_cancel"},
 			},
 		},
 	}
@@ -6241,13 +6367,320 @@ func botHelpText() string {
 - /cv 的 type：song | album | playlist | station | mv | artist
 - /ac 的 type：song | album | playlist | station
 - /st 任务线程：worker1 | worker2 | worker3 | worker4（默认 worker1）
+- /st 语言：zh | en
 
 也支持直接发送 Apple Music 链接（自动识别）：
 song | album | playlist | artist | station | music-video
 `)
 }
 
+func (b *TelegramBot) botHelpTextForChat(chatID int64) string {
+	if b.getChatLanguage(chatID) == telegramLanguageEn {
+		return strings.TrimSpace(`
+Command list (short aliases):
+/h Help
+/i Show current chat_id; also supports resource-id downloads
+/sg <keywords> Search songs
+/sa <keywords> Search albums
+/sr <keywords> Search artists
+/s <type> <keywords> Unified search
+/u <Apple Music URL> Parse and download URL
+/rf <Apple Music URL> Force refresh and resend (clear cache, skip local reuse)
+/ap <artist-url|artist-id> Export artist photo + album covers + animated covers (one-by-one/ZIP)
+/cv <url|type id> Download static cover only
+/ac <url|type id> Download animated cover only
+/ly <song|album> Export lyrics files (format depends on settings)
+/st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/auto extras/language)
+
+Parameters:
+- /s <type>: song | album | artist
+- /cv type: song | album | playlist | station | mv | artist
+- /ac type: song | album | playlist | station
+- /st workers: worker1 | worker2 | worker3 | worker4 (default worker1)
+- /st language: zh | en
+
+You can also send Apple Music URLs directly (auto recognized):
+song | album | playlist | artist | station | music-video
+`)
+	}
+	return botHelpText()
+}
+
 func formatChatIDText(chatID int64) string {
+	return fmt.Sprintf(
+		"会话ID (chat_id): %d\n"+
+			"把这个值写进 config.yaml 白名单：\n"+
+			"telegram-allowed-chat-ids:\n"+
+			"  - %d",
+		chatID,
+		chatID,
+	)
+}
+
+func (b *TelegramBot) formatChatIDTextForChat(chatID int64) string {
+	if b.getChatLanguage(chatID) == telegramLanguageEn {
+		return fmt.Sprintf(
+			"Session ID (chat_id): %d\n"+
+				"Use this value in config.yaml whitelist:\n"+
+				"telegram-allowed-chat-ids:\n"+
+				"  - %d",
+			chatID,
+			chatID,
+		)
+	}
+	return formatChatIDText(chatID)
+}
+
+func (b *TelegramBot) localizeOutgoingText(chatID int64, text string) string {
+	lang := b.getChatLanguage(chatID)
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return text
+	}
+	if lang == telegramLanguageEn {
+		switch trimmed {
+		case "Not authorized for this bot.":
+			return "Not authorized for this bot."
+		case "已取消。":
+			return "Canceled."
+		case "该会话未被授权使用此机器人。":
+			return "Not authorized for this bot."
+		case "请选择发送方式：":
+			return "Choose transfer method:"
+		case "请选择歌词导出方式：":
+			return "Choose lyrics export method:"
+		case "请选择艺人素材导出方式：":
+			return "Choose artist assets export method:"
+		case "无效的 Apple Music 链接。":
+			return "Invalid Apple Music URL."
+		case "无效的目标。":
+			return "Invalid target."
+		case "未知命令。发送 /help 查看用法。":
+			return "Unknown command. Send /help for usage."
+		}
+		if strings.HasPrefix(trimmed, "用法：") {
+			return "Usage: " + strings.TrimPrefix(trimmed, "用法：")
+		}
+		if strings.HasPrefix(trimmed, "失败：") {
+			return "Failed: " + strings.TrimPrefix(trimmed, "失败：")
+		}
+		if strings.HasPrefix(trimmed, "搜索失败：") {
+			return "Search failed: " + strings.TrimPrefix(trimmed, "搜索失败：")
+		}
+		return text
+	}
+
+	switch trimmed {
+	case "Not authorized for this bot.":
+		return "该会话未被授权使用此机器人。"
+	case "Unknown command. Send /help for usage.":
+		return "未知命令。发送 /help 查看用法。"
+	case "Choose transfer method:":
+		return "请选择发送方式："
+	case "Choose lyrics export method:":
+		return "请选择歌词导出方式："
+	case "Choose artist assets export method:":
+		return "请选择艺人素材导出方式："
+	case "Selection expired. Please search again.":
+		return "选择已过期，请重新搜索。"
+	case "Selection out of range.":
+		return "选择超出范围。"
+	case "No results found.":
+		return "没有搜索结果。"
+	case "No content found for this artist.":
+		return "该艺人暂无可用内容。"
+	case "Invalid Apple Music URL.":
+		return "无效的 Apple Music 链接。"
+	case "Invalid target.":
+		return "无效的目标。"
+	case "Please provide a search query.":
+		return "请提供搜索关键词。"
+	case "Search type must be song, album, or artist.":
+		return "搜索类型必须是 song、album 或 artist。"
+	case "Music Video ID is invalid.":
+		return "Music Video ID 无效。"
+	case "MV download requires media-user-token in config.yaml.":
+		return "MV 下载需要在 config.yaml 中配置 media-user-token。"
+	case "MV download requires mp4decrypt in PATH.":
+		return "MV 下载需要在 PATH 中提供 mp4decrypt。"
+	case "Station download requires media-user-token in config.yaml.":
+		return "电台下载需要在 config.yaml 中配置 media-user-token。"
+	case "Same MV task is already running for this chat. Please wait.":
+		return "该会话已有相同 MV 任务在运行，请稍候。"
+	case "Same download task is already running for this chat. Please wait.":
+		return "该会话已有相同下载任务在运行，请稍候。"
+	case "animatedcover only supports song/album/playlist/station.":
+		return "animatedcover 仅支持 song/album/playlist/station。"
+	case "animatedcover requires ffmpeg in PATH.":
+		return "animatedcover 需要在 PATH 中提供 ffmpeg。"
+	case "Invalid song target.":
+		return "无效的歌曲目标。"
+	case "Album ID is empty.":
+		return "专辑 ID 不能为空。"
+	case "Artist ID is empty.":
+		return "艺人 ID 不能为空。"
+	case "Playlist ID is empty.":
+		return "歌单 ID 不能为空。"
+	case "Station ID is empty.":
+		return "电台 ID 不能为空。"
+	case "Music Video ID is empty.":
+		return "MV ID 不能为空。"
+	case "Lyrics export requires media-user-token in config.yaml.":
+		return "歌词导出需要在 config.yaml 中配置 media-user-token。"
+	case "Selection expired. Please request the artist again.":
+		return "选择已过期，请重新请求艺人内容。"
+	case "Selection expired. Please request it again.":
+		return "选择已过期，请重新请求。"
+	case "Unknown artist view.":
+		return "未知的艺人视图。"
+	case "Artist assets export mode: one by one.":
+		return "艺人素材导出方式：逐个发送。"
+	case "Artist assets export mode: ZIP.":
+		return "艺人素材导出方式：ZIP。"
+	case "Unknown artist assets export mode.":
+		return "未知的艺人素材导出方式。"
+	case "Lyrics export mode: one by one.":
+		return "歌词导出方式：逐个发送。"
+	case "Lyrics export mode: ZIP.":
+		return "歌词导出方式：ZIP。"
+	case "Unknown lyrics export mode.":
+		return "未知的歌词导出方式。"
+	case "Transfer mode: one by one (refresh).":
+		return "发送方式：逐个发送（刷新）。"
+	case "Transfer mode: one by one.":
+		return "发送方式：逐个发送。"
+	case "Transfer mode: ZIP (cached).":
+		return "发送方式：ZIP（命中缓存）。"
+	case "Transfer mode: ZIP (refresh).":
+		return "发送方式：ZIP（刷新）。"
+	case "Transfer mode: ZIP.":
+		return "发送方式：ZIP。"
+	case "Unknown transfer mode.":
+		return "未知的发送方式。"
+	}
+	if strings.HasPrefix(trimmed, "Usage: ") {
+		return "用法：" + strings.TrimPrefix(trimmed, "Usage: ")
+	}
+	if strings.HasPrefix(trimmed, "Failed: ") {
+		return "失败：" + strings.TrimPrefix(trimmed, "Failed: ")
+	}
+	if strings.HasPrefix(trimmed, "Failed to ") {
+		return "失败：" + strings.TrimPrefix(trimmed, "Failed to ")
+	}
+	if strings.HasPrefix(trimmed, "Search failed: ") {
+		return "搜索失败：" + strings.TrimPrefix(trimmed, "Search failed: ")
+	}
+	if strings.HasPrefix(trimmed, "Unsupported Apple Music URL: ") {
+		return "不支持的 Apple Music 链接：" + strings.TrimPrefix(trimmed, "Unsupported Apple Music URL: ")
+	}
+	return text
+}
+
+func (b *TelegramBot) shouldMarkAutoDeleteSticky(markup any) bool {
+	if markup == nil {
+		return false
+	}
+	keyboard, ok := markup.(InlineKeyboardMarkup)
+	if !ok {
+		if ptr, okPtr := markup.(*InlineKeyboardMarkup); okPtr && ptr != nil {
+			keyboard = *ptr
+			ok = true
+		}
+	}
+	if !ok {
+		return false
+	}
+	for _, row := range keyboard.InlineKeyboard {
+		for _, button := range row {
+			if strings.TrimSpace(button.CallbackData) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func autoDeleteKey(chatID int64, messageID int) string {
+	return fmt.Sprintf("%d:%d", chatID, messageID)
+}
+
+func (b *TelegramBot) scheduleAutoDeleteMessage(chatID int64, messageID int, sticky bool) {
+	if b == nil || messageID <= 0 || chatID == 0 {
+		return
+	}
+	key := autoDeleteKey(chatID, messageID)
+	b.autoDeleteMu.Lock()
+	if b.autoDeleteMessages == nil {
+		b.autoDeleteMessages = make(map[string]*time.Timer)
+	}
+	if b.autoDeleteSticky == nil {
+		b.autoDeleteSticky = make(map[string]bool)
+	}
+	if existing := b.autoDeleteMessages[key]; existing != nil {
+		existing.Stop()
+	}
+	b.autoDeleteSticky[key] = sticky
+	timer := time.AfterFunc(telegramAutoDeleteAfter, func() {
+		b.autoDeleteMu.Lock()
+		stickyNow := b.autoDeleteSticky[key]
+		timerNow := b.autoDeleteMessages[key]
+		if timerNow != nil {
+			delete(b.autoDeleteMessages, key)
+		}
+		delete(b.autoDeleteSticky, key)
+		b.autoDeleteMu.Unlock()
+		if stickyNow {
+			// sticky panel means "delete if no interaction"; interaction removes tracking entry.
+			_ = b.deleteMessage(chatID, messageID)
+			return
+		}
+		_ = b.deleteMessage(chatID, messageID)
+	})
+	b.autoDeleteMessages[key] = timer
+	b.autoDeleteMu.Unlock()
+}
+
+func (b *TelegramBot) markMessageInteraction(chatID int64, messageID int) {
+	key := autoDeleteKey(chatID, messageID)
+	b.autoDeleteMu.Lock()
+	timer := b.autoDeleteMessages[key]
+	sticky := b.autoDeleteSticky[key]
+	if sticky {
+		if timer != nil {
+			timer.Stop()
+		}
+		delete(b.autoDeleteMessages, key)
+		delete(b.autoDeleteSticky, key)
+	}
+	b.autoDeleteMu.Unlock()
+}
+
+func (b *TelegramBot) clearAutoDeleteMessage(chatID int64, messageID int) {
+	key := autoDeleteKey(chatID, messageID)
+	b.autoDeleteMu.Lock()
+	if timer := b.autoDeleteMessages[key]; timer != nil {
+		timer.Stop()
+	}
+	delete(b.autoDeleteMessages, key)
+	delete(b.autoDeleteSticky, key)
+	b.autoDeleteMu.Unlock()
+}
+
+func (b *TelegramBot) clearAllAutoDeleteMessages() {
+	b.autoDeleteMu.Lock()
+	for key, timer := range b.autoDeleteMessages {
+		if timer != nil {
+			timer.Stop()
+		}
+		delete(b.autoDeleteMessages, key)
+	}
+	for key := range b.autoDeleteSticky {
+		delete(b.autoDeleteSticky, key)
+	}
+	b.autoDeleteMu.Unlock()
+}
+
+func formatChatIDTextLegacy(chatID int64) string {
 	return fmt.Sprintf(
 		"Session ID (chat_id): %d\n"+
 			"Use this value in config.yaml whitelist:\n"+
