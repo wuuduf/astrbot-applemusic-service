@@ -91,6 +91,9 @@ func (b *TelegramBot) stopStateSaver() {
 	if b == nil || b.stateStop == nil {
 		return
 	}
+	if err := b.saveRuntimeStateNow(); err != nil {
+		fmt.Printf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
+	}
 	stopCh := b.stateStop
 	close(stopCh)
 	b.stateWG.Wait()
@@ -288,19 +291,18 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	b.artistModeMu.Unlock()
 
 	b.requestStateMu.Lock()
+	inflightKeys := make(map[string]struct{})
 	for _, request := range b.activeRequests {
 		state.Requests = append(state.Requests, request)
+		if key := strings.TrimSpace(request.InflightKey); key != "" {
+			inflightKeys[key] = struct{}{}
+		}
 	}
 	b.requestStateMu.Unlock()
 
-	b.inflightMu.Lock()
-	for key := range b.inflightDownloads {
-		if strings.TrimSpace(key) == "" {
-			continue
-		}
+	for key := range inflightKeys {
 		state.InflightKeys = append(state.InflightKeys, key)
 	}
-	b.inflightMu.Unlock()
 
 	b.settingsMu.Lock()
 	for chatID, settings := range b.chatSettings {
@@ -426,12 +428,6 @@ func (b *TelegramBot) restoreRuntimeState() {
 	}
 	for key := range b.inflightDownloads {
 		delete(b.inflightDownloads, key)
-	}
-	for _, key := range state.InflightKeys {
-		clean := strings.TrimSpace(key)
-		if clean != "" {
-			b.inflightDownloads[clean] = struct{}{}
-		}
 	}
 	b.inflightMu.Unlock()
 

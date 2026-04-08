@@ -1,6 +1,7 @@
 package ampapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,10 @@ import (
 )
 
 func GetStationResp(storefront string, id string, language string, token string) (*StationResp, error) {
+	return GetStationRespWithContext(context.Background(), storefront, id, language, token)
+}
+
+func GetStationRespWithContext(ctx context.Context, storefront string, id string, language string, token string) (*StationResp, error) {
 	var err error
 	if token == "" {
 		token, err = GetToken()
@@ -20,7 +25,7 @@ func GetStationResp(storefront string, id string, language string, token string)
 		}
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/stations/%s", storefront, id), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/stations/%s", storefront, id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +54,10 @@ func GetStationResp(storefront string, id string, language string, token string)
 }
 
 func GetStationAssetsUrlAndServerUrl(id string, mutoken string, token string) (string, string, error) {
+	return GetStationAssetsUrlAndServerUrlWithContext(context.Background(), id, mutoken, token)
+}
+
+func GetStationAssetsUrlAndServerUrlWithContext(ctx context.Context, id string, mutoken string, token string) (string, string, error) {
 	var err error
 	if token == "" {
 		token, err = GetToken()
@@ -57,7 +66,7 @@ func GetStationAssetsUrlAndServerUrl(id string, mutoken string, token string) (s
 		}
 	}
 
-	req, err := http.NewRequest("GET", "https://amp-api.music.apple.com/v1/play/assets", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://amp-api.music.apple.com/v1/play/assets", nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -93,6 +102,10 @@ func GetStationAssetsUrlAndServerUrl(id string, mutoken string, token string) (s
 }
 
 func GetStationNextTracks(id, mutoken, language, token string) (*TrackResp, error) {
+	return GetStationNextTracksWithContext(context.Background(), id, mutoken, language, token)
+}
+
+func GetStationNextTracksWithContext(ctx context.Context, id, mutoken, language, token string) (*TrackResp, error) {
 	var err error
 	if token == "" {
 		token, err = GetToken()
@@ -101,7 +114,7 @@ func GetStationNextTracks(id, mutoken, language, token string) (*TrackResp, erro
 		}
 	}
 
-	req, err := http.NewRequest("POST", fmt.Sprintf("https://amp-api.music.apple.com/v1/me/stations/next-tracks/%s", id), nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://amp-api.music.apple.com/v1/me/stations/next-tracks/%s", id), nil)
 	if err != nil {
 		return nil, err
 	}

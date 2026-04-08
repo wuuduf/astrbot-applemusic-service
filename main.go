@@ -47,6 +47,10 @@ var (
 	forbiddenNames    = regexp.MustCompile(`[/\\<>:"|?*]`)
 	retryAfterJSONRe  = regexp.MustCompile(`(?i)"retry_after"\s*:\s*(\d+)`)
 	retryAfterTextRe  = regexp.MustCompile(`(?i)retry\s+after\s+(\d+)`)
+	mediaIDNumericRe  = regexp.MustCompile(`^\d+$`)
+	mediaIDPlaylistRe = regexp.MustCompile(`^pl\.[A-Za-z0-9-]+$`)
+	mediaIDStationRe  = regexp.MustCompile(`^ra\.[A-Za-z0-9-]+$`)
+	mediaIDGenericRe  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	artist_select     bool
 	debug_mode        bool
 	alac_max          *int
@@ -60,11 +64,14 @@ var (
 	networkHTTPClient = &http.Client{Timeout: 45 * time.Second}
 )
 
+const maxMediaIDLength = 128
+
 type AudioMeta struct {
 	TrackID        string
 	Title          string
 	Performer      string
 	DurationMillis int64
+	Format         string
 }
 
 type CachedAudio struct {
@@ -93,6 +100,7 @@ type CachedVideo struct {
 }
 
 type DownloadSession struct {
+	Context             context.Context
 	Config              structs.ConfigSet
 	DlAtmos             bool
 	DlAac               bool
@@ -118,6 +126,7 @@ type JobContext struct {
 
 func newDownloadSession(base structs.ConfigSet) *DownloadSession {
 	return &DownloadSession{
+		Context:             context.Background(),
 		Config:              base,
 		OkDict:              make(map[string][]int),
 		DownloadedMeta:      make(map[string]AudioMeta),
@@ -138,7 +147,35 @@ func (s *DownloadSession) resetState() {
 	s.clearDownloadState()
 }
 
-func (s *DownloadSession) recordDownloadedTrack(track *task.Track) {
+func (s *DownloadSession) downloadContext() context.Context {
+	if s == nil || s.Context == nil {
+		return context.Background()
+	}
+	return s.Context
+}
+
+func inferTelegramAudioFormatFromPath(path string, fallback string) string {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(path))) {
+	case ".flac":
+		return telegramFormatFlac
+	case ".aac":
+		return telegramFormatAac
+	case ".m4a", ".mp4":
+		normalized := normalizeTelegramFormat(fallback)
+		if normalized != "" {
+			return normalized
+		}
+		return defaultTelegramFormat
+	default:
+		normalized := normalizeTelegramFormat(fallback)
+		if normalized != "" {
+			return normalized
+		}
+		return defaultTelegramFormat
+	}
+}
+
+func (s *DownloadSession) recordDownloadedTrack(track *task.Track, format string) {
 	if s == nil || track == nil || track.SavePath == "" {
 		return
 	}
@@ -147,6 +184,7 @@ func (s *DownloadSession) recordDownloadedTrack(track *task.Track) {
 		Title:          strings.TrimSpace(track.Resp.Attributes.Name),
 		Performer:      strings.TrimSpace(track.Resp.Attributes.ArtistName),
 		DurationMillis: int64(track.Resp.Attributes.DurationInMillis),
+		Format:         strings.TrimSpace(format),
 	}
 	if meta.TrackID != "" {
 		if override, ok := popSearchMeta(meta.TrackID); ok {
@@ -164,6 +202,9 @@ func (s *DownloadSession) recordDownloadedTrack(track *task.Track) {
 func (s *DownloadSession) recordDownloadedFile(path string, meta AudioMeta) {
 	if s == nil || strings.TrimSpace(path) == "" {
 		return
+	}
+	if normalized := normalizeTelegramFormat(meta.Format); normalized != "" {
+		meta.Format = normalized
 	}
 	s.LastDownloadedPaths = append(s.LastDownloadedPaths, path)
 	s.downloadedMetaMu.Lock()
@@ -573,14 +614,6 @@ func writeCoverWithConfig(sanAlbumFolder, name string, url string, cfg *structs.
 	} else {
 		covPath = filepath.Join(sanAlbumFolder, name+"."+cfg.CoverFormat)
 	}
-	exists, err := fileExists(covPath)
-	if err != nil {
-		fmt.Println("Failed to check if cover exists.")
-		return "", err
-	}
-	if exists {
-		_ = os.Remove(covPath)
-	}
 	if cfg.CoverFormat == "png" {
 		re := regexp.MustCompile(`\{w\}x\{h\}`)
 		parts := re.Split(url, 2)
@@ -591,17 +624,8 @@ func writeCoverWithConfig(sanAlbumFolder, name string, url string, cfg *structs.
 		url = strings.Replace(url, "is1-ssl.mzstatic.com/image/thumb", "a5.mzstatic.com/us/r1000/0", 1)
 		url = url[:strings.LastIndex(url, "/")]
 	}
-	req, err := http.NewRequest("GET", url, nil)
+	data, err := fetchCoverData(url)
 	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	do, err := networkHTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
 		if cfg.CoverFormat == "original" {
 			fmt.Println("Failed to get cover, falling back to " + ext + " url.")
 			splitByDot := strings.Split(originalUrl, ".")
@@ -609,36 +633,78 @@ func writeCoverWithConfig(sanAlbumFolder, name string, url string, cfg *structs.
 			fallback := originalUrl[:len(originalUrl)-len(last)] + ext
 			fallback = strings.Replace(fallback, "{w}x{h}", cfg.CoverSize, 1)
 			fmt.Println("Fallback URL:", fallback)
-			req, err = http.NewRequest("GET", fallback, nil)
-			if err != nil {
-				fmt.Println("Failed to create request for fallback url.")
-				return "", err
-			}
-			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-			do, err = networkHTTPClient.Do(req)
+			data, err = fetchCoverData(fallback)
 			if err != nil {
 				fmt.Println("Failed to get cover from fallback url.")
 				return "", err
 			}
-			defer do.Body.Close()
-			if do.StatusCode != http.StatusOK {
-				fmt.Println(fallback)
-				return "", errors.New(do.Status)
-			}
 		} else {
-			return "", errors.New(do.Status)
+			return "", err
 		}
 	}
-	f, err := os.Create(covPath)
+	if err := os.MkdirAll(filepath.Dir(covPath), 0755); err != nil {
+		return "", err
+	}
+	tmpFile, err := os.CreateTemp(filepath.Dir(covPath), filepath.Base(covPath)+".tmp-*")
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, do.Body)
-	if err != nil {
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := replaceFileAtomically(tmpPath, covPath); err != nil {
+		_ = os.Remove(tmpPath)
 		return "", err
 	}
 	return covPath, nil
+}
+
+func fetchCoverData(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	resp, err := networkHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New(resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func replaceFileAtomically(tmpPath string, targetPath string) error {
+	exists, err := fileExists(targetPath)
+	if err != nil {
+		return err
+	}
+	backupPath := ""
+	if exists {
+		backupPath = fmt.Sprintf("%s.bak-%d", targetPath, time.Now().UnixNano())
+		if err := os.Rename(targetPath, backupPath); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		if backupPath != "" {
+			_ = os.Rename(backupPath, targetPath)
+		}
+		return err
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	return nil
 }
 
 func writeLyrics(sanAlbumFolder, filename string, lrc string) error {
@@ -712,7 +778,7 @@ func convertIfNeeded(session *DownloadSession, track *task.Track, lrc string) {
 	if strings.EqualFold(session.Config.ConvertFormat, "flac") && track.SaveDir != "" {
 		coverPath = findCoverFile(track.SaveDir)
 	}
-	apputils.ConvertIfNeeded(track, lrc, &session.Config, coverPath, session.ActiveProgress)
+	apputils.ConvertIfNeededWithContext(session.downloadContext(), track, lrc, &session.Config, coverPath, session.ActiveProgress)
 }
 
 func main() {
@@ -1513,11 +1579,13 @@ type TelegramBot struct {
 	artistModeMu       sync.Mutex
 	pendingArtistModes map[int64]map[int]*PendingArtistMode
 
-	queueMu       sync.Mutex
-	downloadQueue chan *downloadRequest
-	queueCond     *sync.Cond
-	workerLimit   int
-	activeWorkers int
+	queueMu        sync.Mutex
+	downloadQueue  chan *downloadRequest
+	queueCond      *sync.Cond
+	workerLimit    int
+	activeWorkers  int
+	workerWG       sync.WaitGroup
+	queueCloseOnce sync.Once
 
 	downloadCoreMu sync.Mutex
 
@@ -1771,6 +1839,7 @@ func runTelegramBot(appleToken string) {
 	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
 	defer func() {
+		bot.stopDownloadWorkers()
 		if bot.cleanupTracker != nil {
 			bot.cleanupTracker.stop()
 		}
@@ -2307,7 +2376,9 @@ func (b *TelegramBot) consumePendingUpdatesOnStart() int {
 
 func (b *TelegramBot) startDownloadWorker() {
 	for i := 0; i < downloadWorkerPoolSize; i++ {
+		b.workerWG.Add(1)
 		go func() {
+			defer b.workerWG.Done()
 			for req := range b.downloadQueue {
 				if req == nil {
 					continue
@@ -2379,6 +2450,18 @@ func (b *TelegramBot) startDownloadWorker() {
 			}
 		}()
 	}
+}
+
+func (b *TelegramBot) stopDownloadWorkers() {
+	if b == nil {
+		return
+	}
+	b.queueCloseOnce.Do(func() {
+		if b.downloadQueue != nil {
+			close(b.downloadQueue)
+		}
+	})
+	b.workerWG.Wait()
 }
 
 func normalizeTaskWorkerLimit(limit int) int {
@@ -3167,27 +3250,125 @@ func normalizeCommandMediaType(raw string) string {
 	}
 }
 
+func normalizeMediaIdentifier(mediaType, rawID string) (string, error) {
+	normalizedType := normalizeCommandMediaType(mediaType)
+	if normalizedType == "" {
+		normalizedType = strings.TrimSpace(mediaType)
+	}
+	id := strings.TrimSpace(rawID)
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	if len(id) > maxMediaIDLength {
+		return "", fmt.Errorf("invalid id")
+	}
+	if strings.ContainsAny(id, "/\\\r\n\t\x00") || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid id")
+	}
+	switch normalizedType {
+	case mediaTypeSong, mediaTypeAlbum, mediaTypeArtist, mediaTypeMusicVideo:
+		if !mediaIDNumericRe.MatchString(id) {
+			return "", fmt.Errorf("invalid id")
+		}
+	case mediaTypePlaylist:
+		if !mediaIDPlaylistRe.MatchString(id) {
+			return "", fmt.Errorf("invalid id")
+		}
+	case mediaTypeStation:
+		if !mediaIDStationRe.MatchString(id) {
+			return "", fmt.Errorf("invalid id")
+		}
+	default:
+		if !mediaIDGenericRe.MatchString(id) {
+			return "", fmt.Errorf("invalid id")
+		}
+	}
+	return id, nil
+}
+
+func normalizeAppleURLTarget(target *AppleURLTarget) (*AppleURLTarget, error) {
+	if target == nil {
+		return nil, fmt.Errorf("invalid target")
+	}
+	mediaType := normalizeCommandMediaType(target.MediaType)
+	if mediaType == "" {
+		return nil, fmt.Errorf("invalid media_type")
+	}
+	mediaID, err := normalizeMediaIdentifier(mediaType, target.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &AppleURLTarget{
+		MediaType:  mediaType,
+		Storefront: strings.TrimSpace(target.Storefront),
+		ID:         mediaID,
+		RawURL:     strings.TrimSpace(target.RawURL),
+	}, nil
+}
+
+func joinFileWithinRoot(root string, fileName string) (string, error) {
+	cleanRoot := filepath.Clean(strings.TrimSpace(root))
+	if cleanRoot == "" {
+		return "", fmt.Errorf("invalid root")
+	}
+	candidate := strings.TrimSpace(fileName)
+	if candidate == "" {
+		return "", fmt.Errorf("invalid filename")
+	}
+	if filepath.IsAbs(candidate) {
+		return "", fmt.Errorf("invalid filename")
+	}
+	cleanName := filepath.Clean(candidate)
+	if cleanName == "." || cleanName == ".." {
+		return "", fmt.Errorf("invalid filename")
+	}
+	if strings.Contains(cleanName, "/") || strings.Contains(cleanName, `\`) {
+		return "", fmt.Errorf("invalid filename")
+	}
+	target := filepath.Join(cleanRoot, cleanName)
+	rel, err := filepath.Rel(cleanRoot, target)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes root")
+	}
+	return target, nil
+}
+
 func resolveCommandTarget(args []string, defaultType string) (*AppleURLTarget, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("empty args")
 	}
 	joined := strings.TrimSpace(strings.Join(args, " "))
 	if urlText := extractFirstAppleMusicURL(joined); urlText != "" {
-		return parseAppleMusicURL(urlText)
+		target, err := parseAppleMusicURL(urlText)
+		if err != nil {
+			return nil, err
+		}
+		return normalizeAppleURLTarget(target)
 	}
 	first := strings.TrimSpace(args[0])
 	lowerFirst := strings.ToLower(first)
 	if strings.HasPrefix(lowerFirst, "http://") || strings.HasPrefix(lowerFirst, "https://") {
-		return parseAppleMusicURL(first)
+		target, err := parseAppleMusicURL(first)
+		if err != nil {
+			return nil, err
+		}
+		return normalizeAppleURLTarget(target)
 	}
 	if len(args) >= 2 {
 		mediaType := normalizeCommandMediaType(args[0])
 		mediaID := strings.TrimSpace(args[1])
 		if mediaType != "" && mediaID != "" {
+			normalizedID, err := normalizeMediaIdentifier(mediaType, mediaID)
+			if err != nil {
+				return nil, err
+			}
 			return &AppleURLTarget{
 				MediaType:  mediaType,
 				Storefront: Config.Storefront,
-				ID:         mediaID,
+				ID:         normalizedID,
 			}, nil
 		}
 	}
@@ -3197,10 +3378,14 @@ func resolveCommandTarget(args []string, defaultType string) (*AppleURLTarget, e
 		if mediaID == "" {
 			return nil, fmt.Errorf("empty media id")
 		}
+		normalizedID, err := normalizeMediaIdentifier(defaultType, mediaID)
+		if err != nil {
+			return nil, err
+		}
 		return &AppleURLTarget{
 			MediaType:  defaultType,
 			Storefront: Config.Storefront,
-			ID:         mediaID,
+			ID:         normalizedID,
 		}, nil
 	}
 	return nil, fmt.Errorf("unable to resolve target")
@@ -3359,6 +3544,27 @@ func runExternalCommandInDir(ctx context.Context, dir string, name string, args 
 	return result, err
 }
 
+func runMP4BoxWithTags(ctx context.Context, tags []string, args ...string) (cmdrunner.Result, error) {
+	if len(tags) == 0 {
+		return runExternalCommand(ctx, "MP4Box", args...)
+	}
+	tagFile, err := os.CreateTemp("", "mp4box-itags-*.txt")
+	if err != nil {
+		return cmdrunner.Result{}, err
+	}
+	tagPath := tagFile.Name()
+	defer os.Remove(tagPath)
+	if _, err := tagFile.WriteString(strings.Join(tags, "\n") + "\n"); err != nil {
+		_ = tagFile.Close()
+		return cmdrunner.Result{}, err
+	}
+	if err := tagFile.Close(); err != nil {
+		return cmdrunner.Result{}, err
+	}
+	mp4Args := append([]string{"-itags", tagPath}, args...)
+	return runExternalCommand(ctx, "MP4Box", mp4Args...)
+}
+
 func (b *TelegramBot) catalogService() *sharedcatalog.Service {
 	return &sharedcatalog.Service{
 		AppleToken:     b.appleToken,
@@ -3431,7 +3637,7 @@ func (b *TelegramBot) saveAnimatedCover(motionURL string, savePath string) error
 	if err != nil {
 		return err
 	}
-	result, err := runExternalCommand(context.Background(), "ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", savePath)
+	result, err := runExternalCommand(b.operationContext(), "ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", savePath)
 	if err != nil {
 		outText := strings.TrimSpace(result.Combined)
 		if outText == "" {
@@ -3684,7 +3890,7 @@ func (b *TelegramBot) handleAnimatedCoverOnly(chatID int64, replyToID int, targe
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 	defer os.Remove(tmpPath)
-	result, err := runExternalCommand(context.Background(), "ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath)
+	result, err := runExternalCommand(b.operationContext(), "ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath)
 	if err != nil {
 		errText := strings.TrimSpace(result.Combined)
 		if errText == "" {
@@ -4343,7 +4549,6 @@ func (b *TelegramBot) acquireInflightDownload(key string) bool {
 		return false
 	}
 	b.inflightDownloads[trimmed] = struct{}{}
-	b.requestStateSave()
 	return true
 }
 
@@ -4358,7 +4563,6 @@ func (b *TelegramBot) releaseInflightDownload(key string) {
 	b.inflightMu.Lock()
 	delete(b.inflightDownloads, trimmed)
 	b.inflightMu.Unlock()
-	b.requestStateSave()
 }
 
 func (b *TelegramBot) waitTelegramSend(ctx context.Context, chatID int64) error {
@@ -4366,6 +4570,26 @@ func (b *TelegramBot) waitTelegramSend(ctx context.Context, chatID int64) error 
 		return nil
 	}
 	return b.sendLimiter.wait(ctx, chatID)
+}
+
+func (b *TelegramBot) operationContext() context.Context {
+	if b != nil && b.shutdownCtx != nil {
+		return b.shutdownCtx
+	}
+	return context.Background()
+}
+
+func (b *TelegramBot) uploadContext(session *DownloadSession) context.Context {
+	if session != nil && session.Context != nil {
+		return session.downloadContext()
+	}
+	return b.operationContext()
+}
+
+func (b *TelegramBot) newBotDownloadSession(base structs.ConfigSet) *DownloadSession {
+	session := newDownloadSession(base)
+	session.Context = b.operationContext()
+	return session
 }
 
 func (b *TelegramBot) applyTelegramRetryAfter(duration time.Duration) {
@@ -4609,7 +4833,12 @@ func (b *TelegramBot) queueDownloadMusicVideoWithReply(chatID int64, mvID string
 }
 
 func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID string, storefront string, replyToID int, forceRefresh bool) {
-	if mvID == "" {
+	normalizedID, idErr := normalizeMediaIdentifier(mediaTypeMusicVideo, mvID)
+	if idErr != nil {
+		_ = b.sendMessageWithReply(chatID, "Music Video ID is invalid.", nil, replyToID)
+		return
+	}
+	if normalizedID == "" {
 		_ = b.sendMessage(chatID, "Music Video ID is empty.", nil)
 		return
 	}
@@ -4622,7 +4851,7 @@ func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID s
 		return
 	}
 	settings := b.getChatSettings(chatID)
-	if !forceRefresh && b.trySendCachedMusicVideo(chatID, replyToID, mvID, settings) {
+	if !forceRefresh && b.trySendCachedMusicVideo(chatID, replyToID, normalizedID, settings) {
 		return
 	}
 	if storefront == "" {
@@ -4632,13 +4861,13 @@ func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID s
 	if saveDir == "" {
 		saveDir = "AM-DL downloads"
 	}
-	inflightKey := makeDownloadInflightKey(chatID, mediaTypeMusicVideo, mvID, storefront, transferModeOneByOne, settings)
+	inflightKey := makeDownloadInflightKey(chatID, mediaTypeMusicVideo, normalizedID, storefront, transferModeOneByOne, settings)
 	if !b.acquireInflightDownload(inflightKey) {
 		_ = b.sendMessageWithReply(chatID, "Same MV task is already running for this chat. Please wait.", nil, replyToID)
 		return
 	}
-	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferModeOneByOne, mediaTypeMusicVideo, mvID, storefront, inflightKey, func(session *DownloadSession) error {
-		return mvDownloader(session, mvID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil)
+	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferModeOneByOne, mediaTypeMusicVideo, normalizedID, storefront, inflightKey, func(session *DownloadSession) error {
+		return mvDownloader(session, normalizedID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil)
 	}); !queued {
 		b.releaseInflightDownload(inflightKey)
 	}
@@ -4972,7 +5201,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		b.downloadCoreMu.Lock()
 		defer b.downloadCoreMu.Unlock()
 
-		session = newDownloadSession(Config)
+		session = b.newBotDownloadSession(Config)
 		session.resetState()
 		session.DlSelect = false
 		session.ForceRedownload = forceRefresh

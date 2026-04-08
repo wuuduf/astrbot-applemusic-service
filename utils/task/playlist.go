@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
@@ -8,6 +9,7 @@ import (
 )
 
 type Playlist struct {
+	Context    context.Context
 	Storefront string
 	ID         string
 
@@ -34,12 +36,17 @@ func NewPlaylist(st string, id string) *Playlist {
 
 func (a *Playlist) GetResp(token, l string) error {
 	var err error
+	ctx := a.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.Language = l
-	resp, err := ampapi.GetPlaylistResp(a.Storefront, a.ID, a.Language, token)
+	resp, err := ampapi.GetPlaylistRespWithContext(ctx, a.Storefront, a.ID, a.Language, token)
 	if err != nil {
 		return errors.New("error getting album response")
 	}
 	a.Resp = *resp
+	a.Tracks = nil
 	playlistData, err := safe.FirstRef("task.Playlist.GetResp", "playlist.data", a.Resp.Data)
 	if err != nil {
 		return err
@@ -53,6 +60,7 @@ func (a *Playlist) GetResp(token, l string) error {
 	for i, trackData := range playlistData.Relationships.Tracks.Data {
 		len := len(playlistData.Relationships.Tracks.Data)
 		a.Tracks = append(a.Tracks, Track{
+			Context:    ctx,
 			ID:         trackData.ID,
 			Type:       trackData.Type,
 			Name:       trackData.Attributes.Name,

@@ -12,6 +12,11 @@ import (
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 )
 
+const (
+	telegramCacheDirPerm  = 0o700
+	telegramCacheFilePerm = 0o600
+)
+
 func cacheProfileKey(settings ChatDownloadSettings) string {
 	normalized := normalizeChatSettings(settings)
 	return fmt.Sprintf("%s|aac:%s|mv:%s|lyr:%s|auto:%t-%t-%t",
@@ -47,10 +52,14 @@ func (b *TelegramBot) loadCache() {
 	b.cache = make(map[string]CachedAudio)
 	b.docCache = make(map[string]CachedDocument)
 	b.videoCache = make(map[string]CachedVideo)
-	if b.cacheFile == "" {
+	target := filepath.Clean(strings.TrimSpace(b.cacheFile))
+	if target == "" {
 		return
 	}
-	data, err := os.ReadFile(b.cacheFile)
+	if err := ensureNonSymlinkRegularFile(target); err != nil {
+		return
+	}
+	data, err := os.ReadFile(target)
 	if err != nil {
 		return
 	}
@@ -127,15 +136,9 @@ func (b *TelegramBot) loadCache() {
 }
 
 func (b *TelegramBot) saveCacheLocked() {
-	if b.cacheFile == "" {
+	target := filepath.Clean(strings.TrimSpace(b.cacheFile))
+	if target == "" {
 		return
-	}
-	dir := filepath.Dir(b.cacheFile)
-	if dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			fmt.Printf("telegram cache save failed (%s, mkdir): %v\n", b.cacheFile, err)
-			return
-		}
 	}
 	payload := telegramCacheFile{
 		Version:   4,
@@ -145,17 +148,101 @@ func (b *TelegramBot) saveCacheLocked() {
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		fmt.Printf("telegram cache save failed (%s, marshal): %v\n", b.cacheFile, err)
+		fmt.Printf("telegram cache save failed (%s, marshal): %v\n", target, err)
 		return
 	}
-	tmp := b.cacheFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		fmt.Printf("telegram cache save failed (%s, write tmp): %v\n", b.cacheFile, err)
-		return
+	if err := atomicWriteTelegramCacheFile(target, data); err != nil {
+		fmt.Printf("telegram cache save failed (%s, atomic write): %v\n", target, err)
 	}
-	if err := os.Rename(tmp, b.cacheFile); err != nil {
-		fmt.Printf("telegram cache save failed (%s, rename): %v\n", b.cacheFile, err)
+}
+
+func ensureNonSymlinkRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symlink path: %s", path)
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular cache file: %s", path)
+	}
+	return nil
+}
+
+func ensureCacheDirectory(path string) (string, error) {
+	dir := filepath.Clean(filepath.Dir(path))
+	if dir == "" {
+		return "", fmt.Errorf("invalid cache directory")
+	}
+	if dir != "." {
+		if info, err := os.Lstat(dir); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("refusing symlink cache directory: %s", dir)
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("cache directory is not a directory: %s", dir)
+			}
+		} else if os.IsNotExist(err) {
+			if err := os.MkdirAll(dir, telegramCacheDirPerm); err != nil {
+				return "", err
+			}
+		} else {
+			return "", err
+		}
+		if err := os.Chmod(dir, telegramCacheDirPerm); err != nil && !os.IsPermission(err) {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+func atomicWriteTelegramCacheFile(target string, data []byte) error {
+	if err := ensureNonSymlinkRegularFile(target); err != nil {
+		return err
+	}
+	dir, err := ensureCacheDirectory(target)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".telegram-cache-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	fail := func(writeErr error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return writeErr
+	}
+	if err := tmp.Chmod(telegramCacheFilePerm); err != nil && !os.IsPermission(err) {
+		return fail(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := ensureNonSymlinkRegularFile(target); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(target, telegramCacheFilePerm); err != nil && !os.IsPermission(err) {
+		return err
+	}
+	return nil
 }
 
 func (b *TelegramBot) fetchTrackMeta(trackID string) (AudioMeta, error) {

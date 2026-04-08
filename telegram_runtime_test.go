@@ -104,8 +104,33 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 	if len(loaded.Requests) != 1 || loaded.Requests[0].RequestID != "req-1" {
 		t.Fatalf("expected persisted request")
 	}
-	if len(loaded.InflightKeys) == 0 {
-		t.Fatalf("expected inflight keys")
+	if len(loaded.InflightKeys) != 1 || loaded.InflightKeys[0] != "k1" {
+		t.Fatalf("expected inflight keys derived from requests, got %+v", loaded.InflightKeys)
+	}
+}
+
+func TestTelegramRuntimeStateDoesNotPersistOrphanInflightKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "telegram-state.json")
+	b := &TelegramBot{
+		stateFile:          statePath,
+		pending:            make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+		activeRequests:     make(map[string]telegramPersistedRequest),
+		inflightDownloads:  map[string]struct{}{"orphan-key": {}},
+		chatSettings:       make(map[int64]ChatDownloadSettings),
+	}
+
+	if err := b.saveRuntimeStateNow(); err != nil {
+		t.Fatalf("saveRuntimeStateNow failed: %v", err)
+	}
+	loaded, err := loadRuntimeStateFromFile(statePath)
+	if err != nil {
+		t.Fatalf("loadRuntimeStateFromFile failed: %v", err)
+	}
+	if len(loaded.InflightKeys) != 0 {
+		t.Fatalf("expected no orphan inflight keys to be persisted, got %+v", loaded.InflightKeys)
 	}
 }
 
@@ -165,6 +190,40 @@ func TestTelegramRuntimeStateRestoreQueuesRecoveredRequests(t *testing.T) {
 	}
 	if _, ok := b.inflightDownloads["k-song-1"]; !ok {
 		t.Fatalf("expected recovered inflight key")
+	}
+}
+
+func TestTelegramRuntimeStateRestoreIgnoresLegacyOrphanInflightKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "telegram-state.json")
+	state := telegramPersistedState{
+		Version:      telegramStateVersion,
+		InflightKeys: []string{"legacy-orphan"},
+	}
+	payload, err := jsonMarshalIndentForTest(state)
+	if err != nil {
+		t.Fatalf("marshal state failed: %v", err)
+	}
+	if err := os.WriteFile(statePath, payload, 0644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	b := &TelegramBot{
+		stateFile:          statePath,
+		appleToken:         "token",
+		pending:            make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+		chatSettings:       make(map[int64]ChatDownloadSettings),
+		inflightDownloads:  make(map[string]struct{}),
+		activeRequests:     make(map[string]telegramPersistedRequest),
+		downloadQueue:      make(chan *downloadRequest, 1),
+		stateSave:          make(chan struct{}, 1),
+	}
+	b.restoreRuntimeState()
+
+	if len(b.inflightDownloads) != 0 {
+		t.Fatalf("expected legacy orphan inflight keys to be ignored, got %+v", b.inflightDownloads)
 	}
 }
 
@@ -378,7 +437,7 @@ func TestDownloadWorkerContinuesAfterTaskPanic(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("second task did not run after first task panic")
 	}
-	close(b.downloadQueue)
+	b.stopDownloadWorkers()
 }
 
 func TestTaskWorkerContinuesAfterHeavyTaskPanic(t *testing.T) {
@@ -436,7 +495,85 @@ func TestTaskWorkerContinuesAfterHeavyTaskPanic(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("second heavy task did not run after first task panic")
 	}
-	close(b.downloadQueue)
+	b.stopDownloadWorkers()
+}
+
+func TestStopStateSaverFlushesLatestState(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "telegram-state.json")
+	b := &TelegramBot{
+		stateFile:          statePath,
+		pending:            make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+		activeRequests: map[string]telegramPersistedRequest{
+			"req-1": {RequestID: "req-1", InflightKey: "k1", MediaType: mediaTypeSong, MediaID: "song-1", Storefront: "us"},
+		},
+		inflightDownloads: map[string]struct{}{"k1": {}},
+		chatSettings:      make(map[int64]ChatDownloadSettings),
+	}
+
+	b.startStateSaver()
+	b.stopStateSaver()
+
+	loaded, err := loadRuntimeStateFromFile(statePath)
+	if err != nil {
+		t.Fatalf("loadRuntimeStateFromFile failed: %v", err)
+	}
+	if len(loaded.Requests) != 1 || loaded.Requests[0].RequestID != "req-1" {
+		t.Fatalf("expected latest request to be flushed, got %+v", loaded.Requests)
+	}
+}
+
+func TestStopDownloadWorkersWaitsForRunningTask(t *testing.T) {
+	b := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 1),
+		workerLimit:       1,
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	b.startDownloadWorker()
+
+	done := make(chan struct{})
+	release := make(chan struct{})
+	b.downloadQueue <- &downloadRequest{
+		requestID: "req-1",
+		taskType:  telegramTaskCover,
+		mediaType: mediaTypeAlbum,
+		mediaID:   "album-1",
+		run: func(bot *TelegramBot) error {
+			close(done)
+			<-release
+			return nil
+		},
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("worker did not start task")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		b.stopDownloadWorkers()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatalf("stopDownloadWorkers returned before running task finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("stopDownloadWorkers did not wait for task completion")
+	}
 }
 
 func jsonMarshalIndentForTest(v any) ([]byte, error) {

@@ -85,8 +85,15 @@ func buildFFmpegArgs(ffmpegPath, inPath, outPath, targetFmt, extraArgs string, c
 
 // ConvertIfNeeded performs post-download conversion when enabled.
 func ConvertIfNeeded(track *task.Track, lrc string, cfg *structs.ConfigSet, coverPath string, progress ProgressFunc) {
+	ConvertIfNeededWithContext(context.Background(), track, lrc, cfg, coverPath, progress)
+}
+
+func ConvertIfNeededWithContext(ctx context.Context, track *task.Track, lrc string, cfg *structs.ConfigSet, coverPath string, progress ProgressFunc) {
 	if cfg == nil {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if !cfg.ConvertAfterDownload {
 		return
@@ -143,7 +150,7 @@ func ConvertIfNeeded(track *task.Track, lrc string, cfg *structs.ConfigSet, cove
 	}
 
 	fmt.Printf("Converting -> %s ...\n", targetFmt)
-	result, err := cmdrunner.RunWithOptions(context.Background(), cfg.FFmpegPath, args, cmdrunner.RunOptions{})
+	result, err := cmdrunner.RunWithOptions(ctx, cfg.FFmpegPath, args, cmdrunner.RunOptions{})
 	if err != nil {
 		fmt.Println("Conversion failed:", err)
 		// leave original

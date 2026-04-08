@@ -68,7 +68,7 @@ type astrbotAPIService struct {
 	queue chan *astrbotJob
 
 	jobTimeout        time.Duration
-	executeDownloadFn func(astrbotDownloadRequest) (*astrbotDownloadResult, error)
+	executeDownloadFn func(context.Context, astrbotDownloadRequest) (*astrbotDownloadResult, error)
 }
 
 type artifactPolicy struct {
@@ -229,9 +229,9 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 	if !isLoopbackListenAddr(listenAddr) && apiToken == "" {
 		return fmt.Errorf("refusing non-loopback bind (%s) without ASTRBOT_API_TOKEN", listenAddr)
 	}
-	artifactRoot := filepath.Join(os.TempDir(), "amdl-astrbot-api")
-	if err := os.MkdirAll(artifactRoot, 0755); err != nil {
-		return fmt.Errorf("failed to create artifact root: %w", err)
+	artifactRoot, err := prepareAstrBotArtifactRoot(filepath.Join(os.TempDir(), "amdl-astrbot-api"))
+	if err != nil {
+		return err
 	}
 	service := &astrbotAPIService{
 		appleToken:    token,
@@ -304,11 +304,38 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 		}
 	}()
 
-	err := srv.ListenAndServe()
+	err = srv.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+func prepareAstrBotArtifactRoot(path string) (string, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "" || cleanPath == "." {
+		return "", fmt.Errorf("invalid artifact root path")
+	}
+	info, err := os.Lstat(cleanPath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to inspect artifact root: %w", err)
+	}
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refusing symlink artifact root: %s", cleanPath)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("artifact root is not a directory: %s", cleanPath)
+		}
+	} else {
+		if err := os.MkdirAll(cleanPath, 0700); err != nil {
+			return "", fmt.Errorf("failed to create artifact root: %w", err)
+		}
+	}
+	if err := os.Chmod(cleanPath, 0700); err != nil {
+		return "", fmt.Errorf("failed to secure artifact root: %w", err)
+	}
+	return cleanPath, nil
 }
 
 func (s *astrbotAPIService) withRecovery(next http.Handler) http.Handler {
@@ -354,8 +381,10 @@ func (s *astrbotAPIService) executeDownloadWithTimeout(req astrbotDownloadReques
 		execFn = s.executeDownloadFn
 	}
 	if s == nil || s.jobTimeout <= 0 {
-		return execFn(req)
+		return execFn(context.Background(), req)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.jobTimeout)
+	defer cancel()
 
 	type downloadOutcome struct {
 		result *astrbotDownloadResult
@@ -368,14 +397,17 @@ func (s *astrbotAPIService) executeDownloadWithTimeout(req astrbotDownloadReques
 				outcomeCh <- downloadOutcome{err: fmt.Errorf("worker panic: %v", rec)}
 			}
 		}()
-		result, err := execFn(req)
+		result, err := execFn(ctx, req)
 		outcomeCh <- downloadOutcome{result: result, err: err}
 	}()
 
 	select {
 	case outcome := <-outcomeCh:
+		if outcome.err != nil && errors.Is(outcome.err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("download job timed out after %s", s.jobTimeout)
+		}
 		return outcome.result, outcome.err
-	case <-time.After(s.jobTimeout):
+	case <-ctx.Done():
 		return nil, fmt.Errorf("download job timed out after %s", s.jobTimeout)
 	}
 }
@@ -1090,8 +1122,12 @@ func (s *astrbotAPIService) normalizeDownloadRequest(req astrbotDownloadRequest)
 	}, nil
 }
 
-func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
+func (s *astrbotAPIService) executeDownload(ctx context.Context, req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	session := newDownloadSession(Config)
+	session.Context = ctx
 	session.resetState()
 	quality := normalizeTelegramFormat(req.Quality)
 	if quality == "" {
@@ -1140,9 +1176,9 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 	}
 
 	storefront := normalizeStorefront(req.Storefront)
-	mediaID := strings.TrimSpace(req.ID)
-	if mediaID == "" {
-		return nil, fmt.Errorf("media id is required")
+	mediaID, idErr := normalizeMediaIdentifier(req.MediaType, req.ID)
+	if idErr != nil {
+		return nil, fmt.Errorf("invalid media id")
 	}
 	jobCtx := JobContext{
 		Session:        session,
@@ -1153,16 +1189,28 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 	var err error
 	switch req.MediaType {
 	case mediaTypeSong:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		session.DlSong = true
 		err = ripSong(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken)
 		session.DlSong = false
 	case mediaTypeAlbum:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		err = ripAlbum(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken, "")
 	case mediaTypePlaylist:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		err = ripPlaylist(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken)
 	case mediaTypeStation:
 		if len(strings.TrimSpace(jobCtx.MediaUserToken)) <= 50 {
 			return nil, fmt.Errorf("station download requires media-user-token")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		err = ripStation(jobCtx.Session, mediaID, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken)
 	case mediaTypeMusicVideo:
@@ -1175,6 +1223,9 @@ func (s *astrbotAPIService) executeDownload(req astrbotDownloadRequest) (*astrbo
 		saveDir := strings.TrimSpace(session.Config.AlacSaveFolder)
 		if saveDir == "" {
 			saveDir = "AM-DL downloads"
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		err = mvDownloader(jobCtx.Session, mediaID, saveDir, jobCtx.Token, jobCtx.Storefront, jobCtx.MediaUserToken, nil)
 	default:
@@ -1329,7 +1380,7 @@ func resolveTargetFromRequest(rawURL string, mediaType string, mediaID string, s
 			if storefront != "" {
 				parsed.Storefront = storefront
 			}
-			return parsed, nil
+			return normalizeAppleURLTarget(parsed)
 		}
 		if extracted := extractFirstAppleMusicURL(rawURL); extracted != "" {
 			parsed, err := parseAppleMusicURL(extracted)
@@ -1337,7 +1388,7 @@ func resolveTargetFromRequest(rawURL string, mediaType string, mediaID string, s
 				if storefront != "" {
 					parsed.Storefront = storefront
 				}
-				return parsed, nil
+				return normalizeAppleURLTarget(parsed)
 			}
 		}
 	}
@@ -1345,14 +1396,14 @@ func resolveTargetFromRequest(rawURL string, mediaType string, mediaID string, s
 	if mediaType == "" {
 		return nil, fmt.Errorf("invalid media_type")
 	}
-	mediaID = strings.TrimSpace(mediaID)
-	if mediaID == "" {
-		return nil, fmt.Errorf("id is required")
+	normalizedID, err := normalizeMediaIdentifier(mediaType, mediaID)
+	if err != nil {
+		return nil, err
 	}
 	if storefront == "" {
 		storefront = normalizeStorefront("")
 	}
-	return &AppleURLTarget{MediaType: mediaType, ID: mediaID, Storefront: storefront}, nil
+	return &AppleURLTarget{MediaType: mediaType, ID: normalizedID, Storefront: storefront}, nil
 }
 
 func normalizeStorefront(storefront string) string {

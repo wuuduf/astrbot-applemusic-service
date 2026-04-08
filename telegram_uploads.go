@@ -38,8 +38,11 @@ func closeHTTPIdleConnections(client *http.Client) {
 	}
 }
 
-func newUploadWatchdog(timeout time.Duration) (context.Context, func(), func(), func() bool) {
-	ctx, cancel := context.WithCancel(context.Background())
+func newUploadWatchdog(parent context.Context, timeout time.Duration) (context.Context, func(), func(), func() bool) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	var mu sync.Mutex
 	lastProgress := time.Now()
 	stalled := atomic.Bool{}
@@ -135,12 +138,35 @@ func copyWithUploadProgress(dst io.Writer, src io.Reader, total int64, status *D
 	}
 }
 
-func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAttempts int, fn func() error) error {
+func sleepWithContext(ctx context.Context, duration time.Duration) error {
+	if duration <= 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus, label string, maxAttempts int, fn func() error) error {
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
+	if ctx == nil {
+		ctx = b.operationContext()
+	}
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		lastErr = fn()
 		if lastErr == nil {
 			return nil
@@ -166,9 +192,13 @@ func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAtt
 		closeHTTPIdleConnections(b.client)
 		closeHTTPIdleConnections(b.pollClient)
 		if hasRetryAfter {
-			time.Sleep(retryAfter)
+			if err := sleepWithContext(ctx, retryAfter); err != nil {
+				return err
+			}
 		} else {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			if err := sleepWithContext(ctx, time.Duration(attempt)*time.Second); err != nil {
+				return err
+			}
 		}
 	}
 	return lastErr
@@ -176,10 +206,11 @@ func (b *TelegramBot) sendWithRetry(status *DownloadStatus, label string, maxAtt
 
 func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, settings ChatDownloadSettings) error {
 	var finalErr error
+	uploadCtx := b.uploadContext(session)
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".m4a", ".flac", ".mp3", ".aac", ".wav", ".opus":
-		audioErr := b.sendWithRetry(status, "Audio upload", 2, func() error {
+		audioErr := b.sendWithRetry(uploadCtx, status, "Audio upload", 2, func() error {
 			return b.sendAudioFile(session, chatID, filePath, replyToID, status, settings.Format)
 		})
 		if audioErr == nil {
@@ -189,8 +220,8 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 		if status != nil {
 			status.Update("Audio upload failed, trying document fallback", 0, 0)
 		}
-		docErr := b.sendWithRetry(status, "Document upload", 1, func() error {
-			return b.sendDocumentFile(chatID, filePath, filepath.Base(filePath), replyToID, status, "")
+		docErr := b.sendWithRetry(uploadCtx, status, "Document upload", 1, func() error {
+			return b.sendDocumentFileWithContext(uploadCtx, chatID, filePath, filepath.Base(filePath), replyToID, status, "")
 		})
 		if docErr == nil {
 			finalErr = nil
@@ -198,12 +229,12 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 		}
 		finalErr = fmt.Errorf("sendAudio failed: %v; sendDocument fallback failed: %v", audioErr, docErr)
 	case ".mp4", ".m4v", ".mov":
-		finalErr = b.sendWithRetry(status, "Video upload", 2, func() error {
+		finalErr = b.sendWithRetry(uploadCtx, status, "Video upload", 2, func() error {
 			return b.sendMusicVideoFile(session, chatID, filePath, replyToID, status, settings)
 		})
 	default:
-		finalErr = b.sendWithRetry(status, "Document upload", 2, func() error {
-			return b.sendDocumentFile(chatID, filePath, filepath.Base(filePath), replyToID, status, "")
+		finalErr = b.sendWithRetry(uploadCtx, status, "Document upload", 2, func() error {
+			return b.sendDocumentFileWithContext(uploadCtx, chatID, filePath, filepath.Base(filePath), replyToID, status, "")
 		})
 	}
 	if finalErr != nil {
@@ -232,8 +263,9 @@ func formatMVCaption(meta AudioMeta, sizeBytes int64) string {
 
 func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, settings ChatDownloadSettings) error {
 	if session == nil {
-		session = newDownloadSession(Config)
+		session = b.newBotDownloadSession(Config)
 	}
+	uploadCtx := b.uploadContext(session)
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return err
@@ -252,7 +284,7 @@ func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64,
 		status.Update("Uploading video", 0, 0)
 	}
 	caption := formatMVCaption(meta, info.Size())
-	if err := b.sendVideoFile(chatID, filePath, replyToID, caption, status, videoCacheKey); err == nil {
+	if err := b.sendVideoFileWithContext(uploadCtx, chatID, filePath, replyToID, caption, status, videoCacheKey); err == nil {
 		return nil
 	} else {
 		if videoCacheKey != "" {
@@ -261,7 +293,7 @@ func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64,
 		if status != nil {
 			status.Update("Video upload failed, trying document fallback", 0, 0)
 		}
-		if docErr := b.sendDocumentFile(chatID, filePath, filepath.Base(filePath), replyToID, status, documentCacheKey); docErr == nil {
+		if docErr := b.sendDocumentFileWithContext(uploadCtx, chatID, filePath, filepath.Base(filePath), replyToID, status, documentCacheKey); docErr == nil {
 			return nil
 		} else {
 			return fmt.Errorf("sendVideo failed: %v; sendDocument fallback failed: %v", err, docErr)
@@ -271,14 +303,21 @@ func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64,
 
 func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, format string) error {
 	if session == nil {
-		session = newDownloadSession(Config)
+		session = b.newBotDownloadSession(Config)
 	}
-	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+	uploadCtx := b.uploadContext(session)
+	if err := b.waitTelegramSend(uploadCtx, chatID); err != nil {
 		return err
 	}
+	meta, hasMeta := session.getDownloadedMeta(filePath)
 	format = normalizeTelegramFormat(format)
 	if format == "" {
 		format = defaultTelegramFormat
+	}
+	if hasMeta {
+		if actual := normalizeTelegramFormat(meta.Format); actual != "" {
+			format = actual
+		}
 	}
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch format {
@@ -296,7 +335,6 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	thumbPath := ""
 	compressedPath := ""
 	compressed := false
-	meta, hasMeta := session.getDownloadedMeta(filePath)
 	cleanup := func() {
 		if thumbPath != "" {
 			_ = os.Remove(thumbPath)
@@ -318,7 +356,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		if status != nil {
 			status.Update("Compressing", 0, 0)
 		}
-		compressedPath, err = b.compressFlacToSize(sendPath, b.maxFileBytes)
+		compressedPath, err = b.compressFlacToSize(uploadCtx, sendPath, b.maxFileBytes)
 		if err != nil {
 			return err
 		}
@@ -345,7 +383,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	}
 	bitrateKbps := calcBitrateKbps(sizeBytes, durationMillis)
 	if bitrateKbps <= 0 {
-		if seconds, err := getAudioDurationSeconds(sendPath); err == nil && seconds > 0 {
+		if seconds, err := getAudioDurationSeconds(uploadCtx, sendPath); err == nil && seconds > 0 {
 			durationMillis = int64(seconds * 1000.0)
 			bitrateKbps = calcBitrateKbps(sizeBytes, durationMillis)
 		}
@@ -356,7 +394,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	}
 	coverPath := findCoverFile(filepath.Dir(filePath))
 	if coverPath != "" {
-		if path, err := makeTelegramThumb(coverPath); err == nil {
+		if path, err := makeTelegramThumb(uploadCtx, coverPath); err == nil {
 			thumbPath = path
 		}
 	}
@@ -365,7 +403,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 	writeErrCh := make(chan error, 1)
-	ctx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(uploadNoProgressTimeout)
+	ctx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(uploadCtx, uploadNoProgressTimeout)
 	defer stopWatchdog()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendAudio"), pr)
@@ -487,10 +525,17 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 }
 
 func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayName string, replyToID int, status *DownloadStatus, cacheKey string) error {
+	return b.sendDocumentFileWithContext(b.operationContext(), chatID, filePath, displayName, replyToID, status, cacheKey)
+}
+
+func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID int64, filePath string, displayName string, replyToID int, status *DownloadStatus, cacheKey string) error {
 	if displayName == "" {
 		displayName = filepath.Base(filePath)
 	}
-	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+	if ctx == nil {
+		ctx = b.operationContext()
+	}
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
 		return err
 	}
 	info, err := os.Stat(filePath)
@@ -515,10 +560,10 @@ func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayNam
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 	writeErrCh := make(chan error, 1)
-	ctx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(uploadNoProgressTimeout)
+	reqCtx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(ctx, uploadNoProgressTimeout)
 	defer stopWatchdog()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendDocument"), pr)
+	req, err := http.NewRequestWithContext(reqCtx, "POST", b.apiURL("sendDocument"), pr)
 	if err != nil {
 		_ = pw.CloseWithError(err)
 		return err
@@ -605,7 +650,8 @@ func (b *TelegramBot) sendDocumentByFileID(chatID int64, entry CachedDocument, r
 	if entry.FileID == "" {
 		return fmt.Errorf("document file_id is empty")
 	}
-	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+	ctx := b.operationContext()
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
 		return err
 	}
 	payload := map[string]any{
@@ -619,7 +665,7 @@ func (b *TelegramBot) sendDocumentByFileID(chatID int64, entry CachedDocument, r
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", b.apiURL("sendDocument"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendDocument"), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -648,7 +694,14 @@ func (b *TelegramBot) sendDocumentByFileID(chatID int64, entry CachedDocument, r
 }
 
 func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int, caption string, status *DownloadStatus, cacheKey string) error {
-	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+	return b.sendVideoFileWithContext(b.operationContext(), chatID, filePath, replyToID, caption, status, cacheKey)
+}
+
+func (b *TelegramBot) sendVideoFileWithContext(ctx context.Context, chatID int64, filePath string, replyToID int, caption string, status *DownloadStatus, cacheKey string) error {
+	if ctx == nil {
+		ctx = b.operationContext()
+	}
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
 		return err
 	}
 	info, err := os.Stat(filePath)
@@ -666,10 +719,10 @@ func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 	writeErrCh := make(chan error, 1)
-	ctx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(uploadNoProgressTimeout)
+	reqCtx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(ctx, uploadNoProgressTimeout)
 	defer stopWatchdog()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendVideo"), pr)
+	req, err := http.NewRequestWithContext(reqCtx, "POST", b.apiURL("sendVideo"), pr)
 	if err != nil {
 		_ = pw.CloseWithError(err)
 		return err
@@ -764,7 +817,8 @@ func (b *TelegramBot) sendVideoByFileID(chatID int64, entry CachedVideo, replyTo
 	if entry.FileID == "" {
 		return fmt.Errorf("video file_id is empty")
 	}
-	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+	ctx := b.operationContext()
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
 		return err
 	}
 	payload := map[string]any{
@@ -778,7 +832,7 @@ func (b *TelegramBot) sendVideoByFileID(chatID int64, entry CachedVideo, replyTo
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", b.apiURL("sendVideo"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendVideo"), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -1058,7 +1112,7 @@ func findCoverFile(dir string) string {
 	return ""
 }
 
-func makeTelegramThumb(coverPath string) (string, error) {
+func makeTelegramThumb(ctx context.Context, coverPath string) (string, error) {
 	tmp, err := os.CreateTemp("", "amdl-thumb-*.jpg")
 	if err != nil {
 		return "", err
@@ -1075,7 +1129,7 @@ func makeTelegramThumb(coverPath string) (string, error) {
 		"-q:v", "5",
 		tmpPath,
 	}
-	outputResult, err := runExternalCommand(context.Background(), Config.FFmpegPath, args...)
+	outputResult, err := runExternalCommand(ctx, Config.FFmpegPath, args...)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("ffmpeg thumb failed: %v: %s", err, strings.TrimSpace(outputResult.Combined))
@@ -1087,13 +1141,13 @@ func makeTelegramThumb(coverPath string) (string, error) {
 	return tmpPath, nil
 }
 
-func (b *TelegramBot) compressFlacToSize(srcPath string, maxBytes int64) (string, error) {
+func (b *TelegramBot) compressFlacToSize(ctx context.Context, srcPath string, maxBytes int64) (string, error) {
 	outPath, err := makeTempFlacPath()
 	if err != nil {
 		return "", err
 	}
 	coverPath := findCoverFile(filepath.Dir(srcPath))
-	if err := runFlacCompress(srcPath, outPath, 0, 0, false, coverPath); err != nil {
+	if err := runFlacCompress(ctx, srcPath, outPath, 0, 0, false, coverPath); err != nil {
 		_ = os.Remove(outPath)
 		return "", err
 	}
@@ -1106,7 +1160,7 @@ func (b *TelegramBot) compressFlacToSize(srcPath string, maxBytes int64) (string
 		return outPath, nil
 	}
 
-	duration, err := getAudioDurationSeconds(srcPath)
+	duration, err := getAudioDurationSeconds(ctx, srcPath)
 	if err != nil {
 		_ = os.Remove(outPath)
 		return "", err
@@ -1118,7 +1172,7 @@ func (b *TelegramBot) compressFlacToSize(srcPath string, maxBytes int64) (string
 
 	targetBitsPerSec := (float64(maxBytes) * 8.0 / duration) * 0.95
 	sampleRate, channels := chooseResamplePlan(targetBitsPerSec)
-	if err := runFlacCompress(srcPath, outPath, sampleRate, channels, true, coverPath); err != nil {
+	if err := runFlacCompress(ctx, srcPath, outPath, sampleRate, channels, true, coverPath); err != nil {
 		_ = os.Remove(outPath)
 		return "", err
 	}
@@ -1134,7 +1188,7 @@ func (b *TelegramBot) compressFlacToSize(srcPath string, maxBytes int64) (string
 	return outPath, nil
 }
 
-func runFlacCompress(srcPath, outPath string, sampleRate int, channels int, force16 bool, coverPath string) error {
+func runFlacCompress(ctx context.Context, srcPath, outPath string, sampleRate int, channels int, force16 bool, coverPath string) error {
 	args := []string{"-y", "-i", srcPath}
 	if coverPath != "" {
 		args = append(args, "-i", coverPath)
@@ -1161,7 +1215,7 @@ func runFlacCompress(srcPath, outPath string, sampleRate int, channels int, forc
 		args = append(args, "-ac", strconv.Itoa(channels))
 	}
 	args = append(args, outPath)
-	outputResult, err := runExternalCommand(context.Background(), Config.FFmpegPath, args...)
+	outputResult, err := runExternalCommand(ctx, Config.FFmpegPath, args...)
 	if err != nil {
 		return fmt.Errorf("ffmpeg compress failed: %v: %s", err, strings.TrimSpace(outputResult.Combined))
 	}
@@ -1201,9 +1255,9 @@ func makeTempFlacPath() (string, error) {
 	return path, nil
 }
 
-func getAudioDurationSeconds(path string) (float64, error) {
+func getAudioDurationSeconds(ctx context.Context, path string) (float64, error) {
 	if _, err := exec.LookPath("ffprobe"); err == nil {
-		result, err := runExternalCommand(context.Background(), "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path)
+		result, err := runExternalCommand(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path)
 		if err == nil {
 			value := strings.TrimSpace(result.Stdout)
 			if value != "" {
@@ -1214,7 +1268,7 @@ func getAudioDurationSeconds(path string) (float64, error) {
 		}
 	}
 
-	outResult, _ := runExternalCommand(context.Background(), Config.FFmpegPath, "-i", path)
+	outResult, _ := runExternalCommand(ctx, Config.FFmpegPath, "-i", path)
 	re := regexp.MustCompile(`Duration:\s+(\d+):(\d+):(\d+(?:\.\d+)?)`)
 	match := re.FindStringSubmatch(outResult.Combined)
 	if len(match) != 4 {
@@ -1279,7 +1333,8 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 
 func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyToID int, trackID string) error {
 	entry = b.enrichCachedAudio(trackID, entry)
-	if err := b.waitTelegramSend(context.Background(), chatID); err != nil {
+	ctx := b.operationContext()
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
 		return err
 	}
 	sizeBytes := entry.SizeBytes
@@ -1310,7 +1365,7 @@ func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyTo
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", b.apiURL("sendAudio"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendAudio"), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

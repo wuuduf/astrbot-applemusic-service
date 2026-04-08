@@ -188,7 +188,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 			fmt.Println("Animated artwork square already exists locally.")
 		} else {
 			fmt.Println("Animation Artwork Square Downloading...")
-			if _, err := runExternalCommand(context.Background(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLSquare, "-c", "copy", filepath.Join(folderPath, "square_animated_artwork.mp4")); err != nil {
+			if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLSquare, "-c", "copy", filepath.Join(folderPath, "square_animated_artwork.mp4")); err != nil {
 				fmt.Printf("animated artwork square dl err: %v\n", err)
 			} else {
 				fmt.Println("Animation Artwork Square Downloaded")
@@ -197,7 +197,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 	}
 
 	if cfg.EmbyAnimatedArtwork {
-		if _, err := runExternalCommand(context.Background(), "ffmpeg", "-i", filepath.Join(folderPath, "square_animated_artwork.mp4"), "-vf", "scale=440:-1", "-r", "24", "-f", "gif", filepath.Join(folderPath, "folder.jpg")); err != nil {
+		if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-i", filepath.Join(folderPath, "square_animated_artwork.mp4"), "-vf", "scale=440:-1", "-r", "24", "-f", "gif", filepath.Join(folderPath, "folder.jpg")); err != nil {
 			fmt.Printf("animated artwork square to gif err: %v\n", err)
 		}
 	}
@@ -222,7 +222,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 		return
 	}
 	fmt.Println("Animation Artwork Tall Downloading...")
-	if _, err := runExternalCommand(context.Background(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLTall, "-c", "copy", filepath.Join(folderPath, "tall_animated_artwork.mp4")); err != nil {
+	if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLTall, "-c", "copy", filepath.Join(folderPath, "tall_animated_artwork.mp4")); err != nil {
 		fmt.Printf("animated artwork tall dl err: %v\n", err)
 	} else {
 		fmt.Println("Animation Artwork Tall Downloaded")
@@ -258,6 +258,7 @@ func resolveStationMediaStage(session *DownloadSession, stationID string, token 
 	}
 	cfg := &session.Config
 	station := task.NewStation(storefront, stationID)
+	station.Context = session.downloadContext()
 	if err := station.GetResp(mediaUserToken, token, cfg.Language); err != nil {
 		return nil, err
 	}
@@ -344,10 +345,6 @@ func downloadStationMediaStage(ctx *stationDownloadContext) error {
 
 func downloadStationStreamStage(ctx *stationDownloadContext) error {
 	ctx.session.Counter.Total++
-	if isInArray(ctx.session.OkDict[ctx.station.ID], 1) {
-		ctx.session.Counter.Success++
-		return nil
-	}
 	songName := strings.NewReplacer(
 		"{SongId}", ctx.station.ID,
 		"{SongNumer}", "01",
@@ -361,25 +358,46 @@ func downloadStationStreamStage(ctx *stationDownloadContext) error {
 	).Replace(ctx.cfg.SongFileFormat)
 	fmt.Println(songName)
 	trackPath := filepath.Join(ctx.playlistPath, fmt.Sprintf("%s.m4a", forbiddenNames.ReplaceAllString(songName, "_")))
+	recordStationStream := func() {
+		ctx.session.recordDownloadedFile(trackPath, AudioMeta{
+			TrackID:   strings.TrimSpace(ctx.station.ID),
+			Title:     strings.TrimSpace(ctx.station.Name),
+			Performer: "Apple Music Station",
+			Format:    telegramFormatAac,
+		})
+	}
+	if isInArray(ctx.session.OkDict[ctx.station.ID], 1) {
+		if exists, _ := fileExists(trackPath); exists {
+			recordStationStream()
+		}
+		ctx.session.Counter.Success++
+		return nil
+	}
 	exists := false
 	if ctx.session.shouldReuseExistingFiles() {
 		exists, _ = fileExists(trackPath)
 	}
 	if exists {
+		recordStationStream()
 		ctx.session.Counter.Success++
 		ctx.session.OkDict[ctx.station.ID] = append(ctx.session.OkDict[ctx.station.ID], 1)
 		fmt.Println("Radio already exists locally.")
 		return nil
 	}
-	assetsURL, serverURL, err := ampapi.GetStationAssetsUrlAndServerUrl(ctx.station.ID, ctx.mediaUserToken, ctx.token)
+	assetsURL, serverURL, err := ampapi.GetStationAssetsUrlAndServerUrlWithContext(ctx.session.downloadContext(), ctx.station.ID, ctx.mediaUserToken, ctx.token)
 	if err != nil {
 		fmt.Println("Failed to get station assets url.", err)
 		ctx.session.Counter.Error++
 		return err
 	}
 	trackM3U8 := strings.ReplaceAll(assetsURL, "index.m3u8", "256/prog_index.m3u8")
-	keyAndURLs, _ := runv3.Run(ctx.station.ID, trackM3U8, ctx.token, ctx.mediaUserToken, true, serverURL, nil)
-	if err := runv3.ExtMvData(keyAndURLs, trackPath); err != nil {
+	keyAndURLs, err := runv3.RunWithContext(ctx.session.downloadContext(), ctx.station.ID, trackM3U8, ctx.token, ctx.mediaUserToken, true, serverURL, nil)
+	if err != nil {
+		fmt.Println("Failed to resolve station stream.", err)
+		ctx.session.Counter.Error++
+		return err
+	}
+	if err := runv3.ExtMvDataWithContext(ctx.session.downloadContext(), keyAndURLs, trackPath); err != nil {
 		fmt.Println("Failed to download station stream.", err)
 		ctx.session.Counter.Error++
 		return err
@@ -398,9 +416,10 @@ func downloadStationStreamStage(ctx *stationDownloadContext) error {
 	if ctx.cfg.EmbedCover && strings.TrimSpace(ctx.station.CoverPath) != "" {
 		tags = append(tags, fmt.Sprintf("cover=%s", ctx.station.CoverPath))
 	}
-	if _, err := runExternalCommand(context.Background(), "MP4Box", "-itags", strings.Join(tags, ":"), trackPath); err != nil {
+	if _, err := runMP4BoxWithTags(ctx.session.downloadContext(), tags, trackPath); err != nil {
 		fmt.Printf("Embed failed: %v\n", err)
 	}
+	recordStationStream()
 	ctx.session.Counter.Success++
 	ctx.session.OkDict[ctx.station.ID] = append(ctx.session.OkDict[ctx.station.ID], 1)
 	return nil
@@ -425,6 +444,7 @@ func resolveAlbumMediaStage(session *DownloadSession, albumID string, token stri
 	}
 	cfg := &session.Config
 	album := task.NewAlbum(storefront, albumID)
+	album.Context = session.downloadContext()
 	if err := album.GetResp(token, cfg.Language); err != nil {
 		return nil, err
 	}
@@ -469,7 +489,7 @@ func renderAlbumDebugStage(ctx *albumDownloadContext) error {
 		trackNum++
 		fmt.Printf("\nTrack %d of %d:\n", trackNum, len(ctx.albumData.Relationships.Tracks.Data))
 		fmt.Printf("%02d. %s\n", trackNum, track.Attributes.Name)
-		manifest, err := ampapi.GetSongResp(ctx.storefront, track.ID, ctx.album.Language, ctx.token)
+		manifest, err := ampapi.GetSongRespWithContext(ctx.session.downloadContext(), ctx.storefront, track.ID, ctx.album.Language, ctx.token)
 		if err != nil {
 			fmt.Printf("Failed to get manifest for track %d: %v\n", trackNum, err)
 			continue
@@ -619,6 +639,7 @@ func resolvePlaylistMediaStage(session *DownloadSession, playlistID string, toke
 	}
 	cfg := &session.Config
 	playlist := task.NewPlaylist(storefront, playlistID)
+	playlist.Context = session.downloadContext()
 	if err := playlist.GetResp(token, cfg.Language); err != nil {
 		return nil, err
 	}
@@ -657,7 +678,7 @@ func renderPlaylistDebugStage(ctx *playlistDownloadContext) error {
 		trackNum++
 		fmt.Printf("\nTrack %d of %d:\n", trackNum, len(ctx.playlistData.Relationships.Tracks.Data))
 		fmt.Printf("%02d. %s\n", trackNum, track.Attributes.Name)
-		manifest, err := ampapi.GetSongResp(ctx.storefront, track.ID, ctx.playlist.Language, ctx.token)
+		manifest, err := ampapi.GetSongRespWithContext(ctx.session.downloadContext(), ctx.storefront, track.ID, ctx.playlist.Language, ctx.token)
 		if err != nil {
 			fmt.Printf("Failed to get manifest for track %d: %v\n", trackNum, err)
 			continue
@@ -775,7 +796,7 @@ func resolveSongMediaStage(session *DownloadSession, songID string, token string
 	if session == nil {
 		return nil, fmt.Errorf("download session is nil")
 	}
-	manifest, err := ampapi.GetSongResp(storefront, songID, session.Config.Language, token)
+	manifest, err := ampapi.GetSongRespWithContext(session.downloadContext(), storefront, songID, session.Config.Language, token)
 	if err != nil {
 		return nil, err
 	}
@@ -791,6 +812,7 @@ func resolveSongMediaStage(session *DownloadSession, songID string, token string
 	if err != nil {
 		return nil, err
 	}
+	track.Context = session.downloadContext()
 	if err := track.GetAlbumData(token); err != nil {
 		return nil, err
 	}
@@ -823,6 +845,7 @@ func buildDirectSongTrackStage(songData *ampapi.SongRespData, storefront string,
 		return task.Track{}, err
 	}
 	track := task.Track{
+		Context:    context.Background(),
 		ID:         songData.ID,
 		Type:       songData.Type,
 		Name:       songData.Attributes.Name,

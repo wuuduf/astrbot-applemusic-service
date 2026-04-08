@@ -79,10 +79,7 @@ func CleanupRootPaths(roots []CleanupRoot) []string {
 
 func cleanupRoot(owner Owner, mode Mode, raw string) CleanupRoot {
 	clean := filepath.Clean(strings.TrimSpace(raw))
-	if clean == "." || clean == "" || clean == string(filepath.Separator) {
-		return CleanupRoot{}
-	}
-	if clean == "/tmp" || clean == "/var/tmp" {
+	if isBroadCleanupRoot(clean) {
 		return CleanupRoot{}
 	}
 	return CleanupRoot{
@@ -90,6 +87,34 @@ func cleanupRoot(owner Owner, mode Mode, raw string) CleanupRoot {
 		Mode:  mode,
 		Path:  clean,
 	}
+}
+
+func isBroadCleanupRoot(clean string) bool {
+	if clean == "." || clean == "" || clean == string(filepath.Separator) {
+		return true
+	}
+	switch clean {
+	case "/tmp", "/var/tmp", "/var", "/usr", "/etc", "/bin", "/sbin", "/opt", "/home", "/Users":
+		return true
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		home = filepath.Clean(strings.TrimSpace(home))
+		if home != "" && clean == home {
+			return true
+		}
+	}
+	if filepath.IsAbs(clean) && cleanupPathDepth(clean) < 2 {
+		return true
+	}
+	return false
+}
+
+func cleanupPathDepth(path string) int {
+	trimmed := strings.Trim(path, string(filepath.Separator))
+	if trimmed == "" {
+		return 0
+	}
+	return len(strings.Split(trimmed, string(filepath.Separator)))
 }
 
 func dedupeRoots(roots []CleanupRoot) []CleanupRoot {

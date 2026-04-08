@@ -1,6 +1,7 @@
 package ampapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,10 @@ import (
 )
 
 func GetMusicVideoResp(storefront string, id string, language string, token string) (*MusicVideoResp, error) {
+	return GetMusicVideoRespWithContext(context.Background(), storefront, id, language, token)
+}
+
+func GetMusicVideoRespWithContext(ctx context.Context, storefront string, id string, language string, token string) (*MusicVideoResp, error) {
 	var err error
 	if token == "" {
 		token, err = GetToken()
@@ -19,7 +24,7 @@ func GetMusicVideoResp(storefront string, id string, language string, token stri
 		}
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/music-videos/%s", storefront, id), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/music-videos/%s", storefront, id), nil)
 	if err != nil {
 		return nil, err
 	}

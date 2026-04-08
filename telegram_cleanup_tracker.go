@@ -60,9 +60,14 @@ func telegramCleanupInterval() time.Duration {
 func telegramCleanupScanInterval() time.Duration {
 	sec := Config.TelegramCleanupScanIntervalSec
 	if sec <= 0 {
-		return defaultTelegramCleanupScanInterval
+		sec = int(defaultTelegramCleanupScanInterval / time.Second)
 	}
-	return time.Duration(sec) * time.Second
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN"))) {
+	case "1", "true", "yes", "on":
+		return time.Duration(sec) * time.Second
+	default:
+		return 0
+	}
 }
 
 func telegramCleanupProtectAge() time.Duration {

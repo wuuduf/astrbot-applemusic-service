@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	//"bufio"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 )
 
 type Station struct {
+	Context    context.Context
 	Storefront string
 	ID         string
 
@@ -32,6 +34,30 @@ type Station struct {
 	Tracks   []Track
 }
 
+func (a *Station) appendTrack(ctx context.Context, trackData ampapi.TrackRespData, discTotal int, albumData TrackAlbumData, taskNum int, taskTotal int) {
+	a.Tracks = append(a.Tracks, Track{
+		Context:    ctx,
+		ID:         trackData.ID,
+		Type:       trackData.Type,
+		Name:       trackData.Attributes.Name,
+		Language:   a.Language,
+		Storefront: a.Storefront,
+		TaskNum:    taskNum,
+		TaskTotal:  taskTotal,
+		M3u8:       trackData.Attributes.ExtendedAssetUrls.EnhancedHls,
+		WebM3u8:    trackData.Attributes.ExtendedAssetUrls.EnhancedHls,
+		Resp:       trackData,
+		PreType:    "stations",
+		DiscTotal:  discTotal,
+		PreID:      a.ID,
+		AlbumData:  albumData,
+	})
+	a.Tracks[len(a.Tracks)-1].PlaylistData = TrackPlaylistData{
+		Name:       a.Name,
+		ArtistName: "Apple Music Station",
+	}
+}
+
 func NewStation(st string, id string) *Station {
 	a := new(Station)
 	a.Storefront = st
@@ -43,12 +69,17 @@ func NewStation(st string, id string) *Station {
 
 func (a *Station) GetResp(mutoken, token, l string) error {
 	var err error
+	ctx := a.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.Language = l
-	resp, err := ampapi.GetStationResp(a.Storefront, a.ID, a.Language, token)
+	resp, err := ampapi.GetStationRespWithContext(ctx, a.Storefront, a.ID, a.Language, token)
 	if err != nil {
 		return errors.New("error getting station response")
 	}
 	a.Resp = *resp
+	a.Tracks = nil
 	stationData, err := safe.FirstRef("task.Station.GetResp", "station.data", a.Resp.Data)
 	if err != nil {
 		return err
@@ -59,14 +90,14 @@ func (a *Station) GetResp(mutoken, token, l string) error {
 	if a.Type != "tracks" {
 		return nil
 	}
-	tracksResp, err := ampapi.GetStationNextTracks(a.ID, mutoken, a.Language, token)
+	tracksResp, err := ampapi.GetStationNextTracksWithContext(ctx, a.ID, mutoken, a.Language, token)
 	if err != nil {
 		return errors.New("error getting station tracks response")
 	}
 	//fmt.Println("Getting album response")
 	//从resp中的Tracks数据中提取trackData信息到新的Track结构体中
 	for i, trackData := range tracksResp.Data {
-		albumResp, err := ampapi.GetAlbumRespByHref(trackData.Href, a.Language, token)
+		albumResp, err := ampapi.GetAlbumRespByHrefWithContext(ctx, trackData.Href, a.Language, token)
 		if err != nil {
 			fmt.Println("Error getting album response:", err)
 			continue
@@ -81,31 +112,7 @@ func (a *Station) GetResp(mutoken, token, l string) error {
 		if albumLen > 0 {
 			discTotal = albumData.Relationships.Tracks.Data[albumLen-1].Attributes.DiscNumber
 		}
-		a.Tracks = append(a.Tracks, Track{
-			ID:         trackData.ID,
-			Type:       trackData.Type,
-			Name:       trackData.Attributes.Name,
-			Language:   a.Language,
-			Storefront: a.Storefront,
-
-			//SaveDir:   filepath.Join(a.SaveDir, a.SaveName),
-			//Codec:     a.Codec,
-			TaskNum:   i + 1,
-			TaskTotal: len(tracksResp.Data),
-			M3u8:      trackData.Attributes.ExtendedAssetUrls.EnhancedHls,
-			WebM3u8:   trackData.Attributes.ExtendedAssetUrls.EnhancedHls,
-			//CoverPath: a.CoverPath,
-
-			Resp:      trackData,
-			PreType:   "stations",
-			DiscTotal: discTotal,
-			PreID:     a.ID,
-			AlbumData: buildTrackAlbumData(albumData),
-		})
-		a.Tracks[i].PlaylistData = TrackPlaylistData{
-			Name:       a.Name,
-			ArtistName: "Apple Music Station",
-		}
+		a.appendTrack(ctx, trackData, discTotal, buildTrackAlbumData(albumData), i+1, len(tracksResp.Data))
 	}
 	return nil
 }

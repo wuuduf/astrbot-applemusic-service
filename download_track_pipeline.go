@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +22,7 @@ type trackDownloadContext struct {
 	mediaUserToken string
 
 	needDlAacLc       bool
+	actualFormat      string
 	quality           string
 	tagString         string
 	lrc               string
@@ -30,6 +30,30 @@ type trackDownloadContext struct {
 	convertedPath     string
 	conversionEnabled bool
 	considerConverted bool
+}
+
+func (ctx *trackDownloadContext) sourceFormat() string {
+	switch {
+	case ctx == nil:
+		return defaultTelegramFormat
+	case ctx.session != nil && ctx.session.DlAtmos:
+		return telegramFormatAtmos
+	case ctx != nil && (ctx.session != nil && ctx.session.DlAac || ctx.needDlAacLc):
+		return telegramFormatAac
+	default:
+		return telegramFormatAlac
+	}
+}
+
+func (ctx *trackDownloadContext) recordedFormat() string {
+	if ctx == nil || ctx.track == nil {
+		return defaultTelegramFormat
+	}
+	path := strings.TrimSpace(ctx.track.SavePath)
+	if path == "" {
+		path = strings.TrimSpace(ctx.trackPath)
+	}
+	return inferTelegramAudioFormatFromPath(path, ctx.sourceFormat())
 }
 
 func ripTrack(session *DownloadSession, track *task.Track, token string, mediaUserToken string) {
@@ -185,9 +209,19 @@ func resolveTrackDownloadContextStage(session *DownloadSession, track *task.Trac
 			ctx.considerConverted = true
 		}
 	}
+	switch {
+	case ctx.conversionEnabled && strings.EqualFold(cfg.ConvertFormat, telegramFormatFlac):
+		ctx.actualFormat = telegramFormatFlac
+	case session.DlAtmos:
+		ctx.actualFormat = telegramFormatAtmos
+	case session.DlAac || ctx.needDlAacLc:
+		ctx.actualFormat = telegramFormatAac
+	default:
+		ctx.actualFormat = telegramFormatAlac
+	}
 
 	if cfg.EmbedLrc || cfg.SaveLrcFile {
-		lrcStr, err := lyrics.Get(track.Storefront, track.ID, cfg.LrcType, cfg.Language, cfg.LrcFormat, token, mediaUserToken)
+		lrcStr, err := lyrics.GetWithContext(session.downloadContext(), track.Storefront, track.ID, cfg.LrcType, cfg.Language, cfg.LrcFormat, token, mediaUserToken)
 		if err != nil {
 			fmt.Println(err)
 		} else {
@@ -231,7 +265,7 @@ func handleTrackReuseStage(ctx *trackDownloadContext) bool {
 				convertIfNeeded(ctx.session, ctx.track, ctx.lrc)
 			}
 		}
-		ctx.session.recordDownloadedTrack(ctx.track)
+		ctx.session.recordDownloadedTrack(ctx.track, ctx.recordedFormat())
 		ctx.session.Counter.Success++
 		ctx.session.OkDict[ctx.track.PreID] = append(ctx.session.OkDict[ctx.track.PreID], ctx.track.TaskNum)
 		return true
@@ -243,7 +277,7 @@ func handleTrackReuseStage(ctx *trackDownloadContext) bool {
 			fmt.Println("Converted track already exists locally.")
 			ctx.track.SavePath = ctx.convertedPath
 			ctx.track.SaveName = filepath.Base(ctx.convertedPath)
-			ctx.session.recordDownloadedTrack(ctx.track)
+			ctx.session.recordDownloadedTrack(ctx.track, ctx.recordedFormat())
 			ctx.session.Counter.Success++
 			ctx.session.OkDict[ctx.track.PreID] = append(ctx.session.OkDict[ctx.track.PreID], ctx.track.TaskNum)
 			return true
@@ -260,7 +294,7 @@ func downloadTrackMediaStage(ctx *trackDownloadContext) bool {
 			ctx.session.Counter.Error++
 			return false
 		}
-		if _, err := runv3.Run(ctx.track.ID, ctx.trackPath, ctx.token, ctx.mediaUserToken, false, "", ctx.session.ActiveProgress); err != nil {
+		if _, err := runv3.RunWithContext(ctx.session.downloadContext(), ctx.track.ID, ctx.trackPath, ctx.token, ctx.mediaUserToken, false, "", ctx.session.ActiveProgress); err != nil {
 			fmt.Println("Failed to dl aac-lc:", err)
 			if err.Error() == "Unavailable" {
 				ctx.session.Counter.Unavailable++
@@ -278,7 +312,7 @@ func downloadTrackMediaStage(ctx *trackDownloadContext) bool {
 		ctx.session.Counter.Unavailable++
 		return false
 	}
-	if err := runv2.Run(ctx.track.ID, trackM3U8URL, ctx.trackPath, ctx.session.Config, ctx.session.ActiveProgress); err != nil {
+	if err := runv2.RunWithContext(ctx.session.downloadContext(), ctx.track.ID, trackM3U8URL, ctx.trackPath, ctx.session.Config, ctx.session.ActiveProgress); err != nil {
 		fmt.Println("Failed to run v2:", err)
 		ctx.session.Counter.Error++
 		return false
@@ -303,8 +337,7 @@ func postProcessTrackStage(ctx *trackDownloadContext) bool {
 			tags = append(tags, fmt.Sprintf("cover=%s", ctx.track.CoverPath))
 		}
 	}
-	tagsString := strings.Join(tags, ":")
-	if _, err := runExternalCommand(context.Background(), "MP4Box", "-itags", tagsString, ctx.trackPath); err != nil {
+	if _, err := runMP4BoxWithTags(ctx.session.downloadContext(), tags, ctx.trackPath); err != nil {
 		fmt.Printf("Embed failed: %v\n", err)
 		ctx.session.Counter.Error++
 		return false
@@ -327,7 +360,7 @@ func postProcessTrackStage(ctx *trackDownloadContext) bool {
 }
 
 func finishTrackDownloadStage(ctx *trackDownloadContext) {
-	ctx.session.recordDownloadedTrack(ctx.track)
+	ctx.session.recordDownloadedTrack(ctx.track, ctx.recordedFormat())
 	ctx.session.Counter.Success++
 	ctx.session.OkDict[ctx.track.PreID] = append(ctx.session.OkDict[ctx.track.PreID], ctx.track.TaskNum)
 }

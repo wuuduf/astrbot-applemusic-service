@@ -1,11 +1,13 @@
 package task
 
 import (
+	"context"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 type Track struct {
+	Context    context.Context
 	ID         string
 	Type       string
 	Name       string
@@ -34,7 +36,11 @@ type Track struct {
 
 func (t *Track) GetAlbumData(token string) error {
 	var err error
-	resp, err := ampapi.GetAlbumRespByHref(t.Resp.Href, t.Language, token)
+	ctx := t.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, err := ampapi.GetAlbumRespByHrefWithContext(ctx, t.Resp.Href, t.Language, token)
 	if err != nil {
 		return err
 	}

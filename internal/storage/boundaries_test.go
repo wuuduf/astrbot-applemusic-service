@@ -81,6 +81,22 @@ func TestCleanupRootSkipsSharedSystemTemp(t *testing.T) {
 	}
 }
 
+func TestCleanupRootSkipsBroadSystemDirectories(t *testing.T) {
+	for _, path := range []string{"/Users", "/home", "/var", "/usr", "/etc", "/opt"} {
+		if root := cleanupRoot(OwnerTelegram, ModeDownload, path); root.Path != "" {
+			t.Fatalf("expected %s to be skipped, got %#v", path, root)
+		}
+	}
+}
+
+func TestCleanupRootSkipsUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if root := cleanupRoot(OwnerTelegram, ModeDownload, home); root.Path != "" {
+		t.Fatalf("expected HOME directory to be skipped, got %#v", root)
+	}
+}
+
 func TestAstrBotArtifactRoot(t *testing.T) {
 	root := AstrBotArtifactRoot("/data/astrbot-artifacts")
 	if root.Owner != OwnerAstrBot || root.Mode != ModeArtifact || root.Path != "/data/astrbot-artifacts" {

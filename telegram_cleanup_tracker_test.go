@@ -148,3 +148,17 @@ func TestTelegramCleanupTrackerJanitor(t *testing.T) {
 	tracker.mu.Unlock()
 	t.Fatalf("expected janitor to evict old file after startup scan, scanRuns=%d", scanRuns)
 }
+
+func TestTelegramCleanupScanIntervalDisabledByDefault(t *testing.T) {
+	t.Setenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN", "")
+	if got := telegramCleanupScanInterval(); got != 0 {
+		t.Fatalf("expected scan interval to be disabled by default, got %s", got)
+	}
+}
+
+func TestTelegramCleanupScanIntervalCanBeEnabledByEnv(t *testing.T) {
+	t.Setenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN", "1")
+	if got := telegramCleanupScanInterval(); got <= 0 {
+		t.Fatalf("expected scan interval to be enabled with env, got %s", got)
+	}
+}

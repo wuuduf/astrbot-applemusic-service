@@ -1,6 +1,7 @@
 package nethttp
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"os"
@@ -56,4 +57,15 @@ func Do(req *http.Request) (*http.Response, error) {
 
 func Get(rawurl string) (*http.Response, error) {
 	return Client().Get(rawurl)
+}
+
+func GetWithContext(ctx context.Context, rawurl string) (*http.Response, error) {
+	if ctx == nil {
+		return Get(rawurl)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl, nil)
+	if err != nil {
+		return nil, err
+	}
+	return Do(req)
 }

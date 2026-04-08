@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,14 +21,23 @@ import (
 	"github.com/wuuduf/astrbot-applemusic-service/utils/task"
 )
 
+var stdoutCaptureMu sync.Mutex
+
 func captureStdoutForTest(t *testing.T, fn func()) string {
 	t.Helper()
+	stdoutCaptureMu.Lock()
+	defer stdoutCaptureMu.Unlock()
 	original := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe failed: %v", err)
 	}
 	os.Stdout = w
+	defer func() {
+		os.Stdout = original
+		_ = w.Close()
+		_ = r.Close()
+	}()
 	done := make(chan string, 1)
 	go func() {
 		data, _ := io.ReadAll(r)
@@ -36,8 +46,9 @@ func captureStdoutForTest(t *testing.T, fn func()) string {
 	fn()
 	_ = w.Close()
 	os.Stdout = original
+	out := <-done
 	_ = r.Close()
-	return <-done
+	return out
 }
 
 func TestWriteMP4TagsMissingGenreReturnsAccessError(t *testing.T) {
@@ -693,6 +704,97 @@ printf '%%s\n' "$last" >> "$log"
 	}
 }
 
+func TestWriteCoverWithConfigPreservesExistingFileOnRefreshFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	coverPath := filepath.Join(tmpDir, "cover.jpg")
+	if err := os.WriteFile(coverPath, []byte("old-cover"), 0644); err != nil {
+		t.Fatalf("write cover fixture: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	oldClient := networkHTTPClient
+	networkHTTPClient = server.Client()
+	defer func() {
+		networkHTTPClient = oldClient
+	}()
+
+	cfg := &structs.ConfigSet{
+		CoverFormat: "jpg",
+		CoverSize:   "1000x1000",
+	}
+	_, err := writeCoverWithConfig(tmpDir, "cover", server.URL+"/art/{w}x{h}.jpg", cfg)
+	if err == nil {
+		t.Fatalf("expected cover download to fail")
+	}
+
+	data, err := os.ReadFile(coverPath)
+	if err != nil {
+		t.Fatalf("read preserved cover: %v", err)
+	}
+	if string(data) != "old-cover" {
+		t.Fatalf("expected existing cover to be preserved, got %q", string(data))
+	}
+}
+
+func TestRunMP4BoxWithTagsUsesTagFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "mp4box-tags.log")
+	mp4boxPath := filepath.Join(tmpDir, "MP4Box")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+log=%q
+tagfile=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-itags" ]; then
+    tagfile="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [ -z "$tagfile" ]; then
+  echo "missing tag file" >&2
+  exit 1
+fi
+cat "$tagfile" > "$log"
+`, logPath)
+	if err := os.WriteFile(mp4boxPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake MP4Box: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", tmpDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	defer func() {
+		_ = os.Setenv("PATH", oldPath)
+	}()
+
+	tags := []string{
+		"title=Song:Name",
+		"artist=Artist",
+		"cover=/tmp/cover:art.jpg",
+	}
+	if _, err := runMP4BoxWithTags(context.Background(), tags, "dummy.m4a"); err != nil {
+		t.Fatalf("runMP4BoxWithTags failed: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read MP4Box log: %v", err)
+	}
+	got := string(data)
+	for _, tag := range tags {
+		if !strings.Contains(got, tag+"\n") {
+			t.Fatalf("expected tag %q in tag file, got %q", tag, got)
+		}
+	}
+}
+
 func TestTelegramCacheSaveLogsFailure(t *testing.T) {
 	b := &TelegramBot{
 		cacheFile:  "/dev/null/telegram-cache.json",
@@ -729,11 +831,13 @@ func TestTelegramStateSaverLogsFailure(t *testing.T) {
 }
 
 func TestAstrBotExecuteDownloadWithTimeout(t *testing.T) {
+	done := make(chan struct{})
 	svc := &astrbotAPIService{
 		jobTimeout: 20 * time.Millisecond,
-		executeDownloadFn: func(req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
-			time.Sleep(100 * time.Millisecond)
-			return &astrbotDownloadResult{MediaID: req.ID}, nil
+		executeDownloadFn: func(ctx context.Context, req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
+			defer close(done)
+			<-ctx.Done()
+			return nil, ctx.Err()
 		},
 	}
 
@@ -743,6 +847,268 @@ func TestAstrBotExecuteDownloadWithTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("expected executeDownloadFn context to be canceled")
+	}
+}
+
+func TestPrepareAstrBotArtifactRootRejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "target")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	linkPath := filepath.Join(tmpDir, "artifact-link")
+	if err := os.Symlink(targetDir, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	if _, err := prepareAstrBotArtifactRoot(linkPath); err == nil {
+		t.Fatalf("expected symlink artifact root to be rejected")
+	}
+}
+
+func TestDownloadStationStreamStageRecordsReusedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	session := newDownloadSession(structs.ConfigSet{
+		SongFileFormat: "{SongName}",
+	})
+	ctx := &stationDownloadContext{
+		session:      session,
+		cfg:          &session.Config,
+		station:      &task.Station{ID: "ra.123", Name: "Test Station"},
+		playlistPath: tmpDir,
+	}
+
+	songName := strings.NewReplacer(
+		"{SongId}", ctx.station.ID,
+		"{SongNumer}", "01",
+		"{SongName}", LimitStringWithConfig(ctx.cfg, ctx.station.Name),
+		"{ArtistName}", "Apple Music Station",
+		"{DiscNumber}", "1",
+		"{TrackNumber}", "1",
+		"{Quality}", "256Kbps",
+		"{Tag}", "",
+		"{Codec}", "AAC",
+	).Replace(ctx.cfg.SongFileFormat)
+	trackPath := filepath.Join(tmpDir, fmt.Sprintf("%s.m4a", forbiddenNames.ReplaceAllString(songName, "_")))
+	if err := os.WriteFile(trackPath, []byte("station"), 0644); err != nil {
+		t.Fatalf("write station track: %v", err)
+	}
+	session.OkDict[ctx.station.ID] = []int{1}
+
+	if err := downloadStationStreamStage(ctx); err != nil {
+		t.Fatalf("downloadStationStreamStage failed: %v", err)
+	}
+	if len(session.LastDownloadedPaths) != 1 || session.LastDownloadedPaths[0] != trackPath {
+		t.Fatalf("expected reused station file to be recorded, got %v", session.LastDownloadedPaths)
+	}
+	meta, ok := session.getDownloadedMeta(trackPath)
+	if !ok {
+		t.Fatalf("expected downloaded meta for reused station file")
+	}
+	if meta.Format != telegramFormatAac {
+		t.Fatalf("expected station stream format=%s, got %s", telegramFormatAac, meta.Format)
+	}
+}
+
+func TestSendAudioFileUsesActualFormatFromMeta(t *testing.T) {
+	tmpDir := t.TempDir()
+	audioPath := filepath.Join(tmpDir, "track.m4a")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"audio-aac","file_size":5}}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:        "test-token",
+		apiBase:      server.URL,
+		client:       server.Client(),
+		maxFileBytes: 1024,
+	}
+	session := newDownloadSession(Config)
+	session.recordDownloadedFile(audioPath, AudioMeta{
+		TrackID:        "track-1",
+		Title:          "Song",
+		Performer:      "Artist",
+		DurationMillis: 1000,
+		Format:         telegramFormatAac,
+	})
+
+	if err := bot.sendAudioFile(session, 42, audioPath, 0, nil, telegramFormatAlac); err != nil {
+		t.Fatalf("sendAudioFile failed: %v", err)
+	}
+	if _, ok := bot.getCachedAudio("track-1", bot.maxFileBytes, telegramFormatAac); !ok {
+		t.Fatalf("expected AAC cache entry")
+	}
+	if _, ok := bot.getCachedAudio("track-1", bot.maxFileBytes, telegramFormatAlac); ok {
+		t.Fatalf("did not expect ALAC cache entry for AAC fallback output")
+	}
+}
+
+func TestTelegramSendWithRetryRespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bot := &TelegramBot{}
+	attempts := 0
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := bot.sendWithRetry(ctx, nil, "Upload", 3, func() error {
+		attempts++
+		return fmt.Errorf("context deadline exceeded")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected retry loop to stop before second attempt, got %d attempts", attempts)
+	}
+}
+
+func TestTelegramBotNewBotDownloadSessionUsesShutdownContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bot := &TelegramBot{shutdownCtx: ctx}
+	session := bot.newBotDownloadSession(Config)
+	cancel()
+
+	select {
+	case <-session.downloadContext().Done():
+	case <-time.After(time.Second):
+		t.Fatalf("expected bot download session context to be canceled")
+	}
+}
+
+func TestSendAudioFileRespectsSessionContextLimiterWait(t *testing.T) {
+	tmpDir := t.TempDir()
+	audioPath := filepath.Join(tmpDir, "track.m4a")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	limiter := newTelegramSendLimiter(time.Hour, 0)
+	if limiter == nil {
+		t.Fatalf("expected limiter")
+	}
+	limiter.lastAll = time.Now()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	bot := &TelegramBot{
+		sendLimiter:  limiter,
+		maxFileBytes: 1024,
+	}
+	session := newDownloadSession(Config)
+	session.Context = ctx
+
+	err := bot.sendAudioFile(session, 42, audioPath, 0, nil, telegramFormatAlac)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
+func TestHandleTrackReuseStageRecordsSourceFormatWhenConversionFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	trackPath := filepath.Join(tmpDir, "song.m4a")
+	if err := os.WriteFile(trackPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	session := newDownloadSession(structs.ConfigSet{
+		ConvertAfterDownload:       true,
+		ConvertFormat:              telegramFormatFlac,
+		ConvertKeepOriginal:        false,
+		ConvertSkipLossyToLossless: false,
+		ConvertWarnLossyToLossless: false,
+		FFmpegPath:                 "definitely-missing-ffmpeg-binary",
+	})
+	track := &task.Track{
+		SaveDir: tmpDir,
+		PreID:   "album-1",
+		TaskNum: 1,
+	}
+	ctx := &trackDownloadContext{
+		session:           session,
+		cfg:               &session.Config,
+		track:             track,
+		trackPath:         trackPath,
+		convertedPath:     filepath.Join(tmpDir, "song.flac"),
+		conversionEnabled: true,
+		considerConverted: true,
+		actualFormat:      telegramFormatFlac,
+	}
+
+	if !handleTrackReuseStage(ctx) {
+		t.Fatalf("expected reuse stage to succeed")
+	}
+	if track.SavePath != trackPath {
+		t.Fatalf("expected original path to remain selected, got %q", track.SavePath)
+	}
+	meta, ok := session.getDownloadedMeta(trackPath)
+	if !ok {
+		t.Fatalf("expected downloaded metadata for reused track")
+	}
+	if meta.Format != telegramFormatAlac {
+		t.Fatalf("expected ALAC format after failed conversion, got %s", meta.Format)
+	}
+}
+
+func TestHandleTrackReuseStageRecordsConvertedFormatWhenConvertedExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	convertedPath := filepath.Join(tmpDir, "song.flac")
+	if err := os.WriteFile(convertedPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("write converted audio: %v", err)
+	}
+
+	session := newDownloadSession(structs.ConfigSet{
+		ConvertAfterDownload: true,
+		ConvertFormat:        telegramFormatFlac,
+		ConvertKeepOriginal:  false,
+	})
+	track := &task.Track{
+		SaveDir: tmpDir,
+		PreID:   "album-1",
+		TaskNum: 1,
+	}
+	ctx := &trackDownloadContext{
+		session:           session,
+		cfg:               &session.Config,
+		track:             track,
+		trackPath:         filepath.Join(tmpDir, "song.m4a"),
+		convertedPath:     convertedPath,
+		conversionEnabled: true,
+		considerConverted: true,
+		actualFormat:      telegramFormatFlac,
+	}
+
+	if !handleTrackReuseStage(ctx) {
+		t.Fatalf("expected converted reuse stage to succeed")
+	}
+	if track.SavePath != convertedPath {
+		t.Fatalf("expected converted path to be selected, got %q", track.SavePath)
+	}
+	meta, ok := session.getDownloadedMeta(convertedPath)
+	if !ok {
+		t.Fatalf("expected downloaded metadata for converted track")
+	}
+	if meta.Format != telegramFormatFlac {
+		t.Fatalf("expected FLAC format for converted output, got %s", meta.Format)
 	}
 }
 
@@ -805,5 +1171,139 @@ func TestBuildTrackSelectionStage(t *testing.T) {
 	custom := buildTrackSelectionStage(4, true, func() []int { return []int{2, 4} })
 	if len(custom) != 2 || custom[0] != 2 || custom[1] != 4 {
 		t.Fatalf("unexpected custom selection: %#v", custom)
+	}
+}
+
+func TestNormalizeMediaIdentifierRejectsTraversal(t *testing.T) {
+	t.Parallel()
+	if _, err := normalizeMediaIdentifier(mediaTypeMusicVideo, "../12345"); err == nil {
+		t.Fatalf("expected traversal media id to be rejected")
+	}
+	if _, err := normalizeMediaIdentifier(mediaTypeMusicVideo, `12\34`); err == nil {
+		t.Fatalf("expected backslash media id to be rejected")
+	}
+}
+
+func TestNormalizeMediaIdentifierAcceptsKnownPatterns(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		mediaType string
+		id        string
+	}{
+		{mediaTypeMusicVideo, "123456789"},
+		{mediaTypeSong, "987654321"},
+		{mediaTypePlaylist, "pl.u-123ABC-def"},
+		{mediaTypeStation, "ra.9876abcd"},
+	}
+	for _, tc := range cases {
+		if _, err := normalizeMediaIdentifier(tc.mediaType, tc.id); err != nil {
+			t.Fatalf("expected %s id %q to pass, got error: %v", tc.mediaType, tc.id, err)
+		}
+	}
+}
+
+func TestResolveCommandTargetRejectsTraversalMediaID(t *testing.T) {
+	if _, err := resolveCommandTarget([]string{"mv", "../escape"}, ""); err == nil {
+		t.Fatalf("expected traversal ID to be rejected")
+	}
+}
+
+func TestResolveTargetFromRequestRejectsTraversalMediaID(t *testing.T) {
+	if _, err := resolveTargetFromRequest("", "mv", "../../escape", "us"); err == nil {
+		t.Fatalf("expected traversal ID to be rejected")
+	}
+}
+
+func TestJoinFileWithinRootRejectsEscapingPaths(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if _, err := joinFileWithinRoot(root, "../oops.mp4"); err == nil {
+		t.Fatalf("expected escaping filename to be rejected")
+	}
+	if _, err := joinFileWithinRoot(root, "/tmp/oops.mp4"); err == nil {
+		t.Fatalf("expected absolute filename to be rejected")
+	}
+	path, err := joinFileWithinRoot(root, "safe.mp4")
+	if err != nil {
+		t.Fatalf("expected safe filename to pass, got %v", err)
+	}
+	if got, want := filepath.Dir(path), filepath.Clean(root); got != want {
+		t.Fatalf("expected output under root, got dir=%s want=%s", got, want)
+	}
+}
+
+func TestTelegramCacheSaveUsesSecureFileMode(t *testing.T) {
+	t.Parallel()
+	cachePath := filepath.Join(t.TempDir(), "telegram-cache.json")
+	b := &TelegramBot{
+		cacheFile:  cachePath,
+		cache:      map[string]CachedAudio{"1|alac|false": {FileID: "audio-file-1"}},
+		docCache:   map[string]CachedDocument{},
+		videoCache: map[string]CachedVideo{},
+	}
+
+	b.saveCacheLocked()
+
+	info, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatalf("expected cache file to be written: %v", err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(telegramCacheFilePerm); got != want {
+		t.Fatalf("unexpected cache file mode: got %o want %o", got, want)
+	}
+	if _, err := os.Stat(cachePath + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("expected fixed tmp file not to be used, err=%v", err)
+	}
+}
+
+func TestTelegramCacheSaveRejectsSymlinkTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	realPath := filepath.Join(tmpDir, "real-cache.json")
+	if err := os.WriteFile(realPath, []byte(`{"keep":"original"}`), 0o600); err != nil {
+		t.Fatalf("write real cache file: %v", err)
+	}
+	linkPath := filepath.Join(tmpDir, "cache-link.json")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	b := &TelegramBot{
+		cacheFile:  linkPath,
+		cache:      map[string]CachedAudio{"1|alac|false": {FileID: "audio-file-1"}},
+		docCache:   map[string]CachedDocument{},
+		videoCache: map[string]CachedVideo{},
+	}
+	out := captureStdoutForTest(t, func() {
+		b.saveCacheLocked()
+	})
+
+	raw, err := os.ReadFile(realPath)
+	if err != nil {
+		t.Fatalf("read real cache file: %v", err)
+	}
+	if string(raw) != `{"keep":"original"}` {
+		t.Fatalf("expected symlink target not to be overwritten, got %q", string(raw))
+	}
+	if !strings.Contains(strings.ToLower(out), "symlink") {
+		t.Fatalf("expected symlink rejection log, got %q", out)
+	}
+}
+
+func TestTelegramCacheLoadSkipsSymlinkFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	realPath := filepath.Join(tmpDir, "real-cache.json")
+	content := `{"version":4,"items":{"1|alac|false":{"file_id":"audio-file-1"}}}`
+	if err := os.WriteFile(realPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write real cache file: %v", err)
+	}
+	linkPath := filepath.Join(tmpDir, "cache-link.json")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	b := &TelegramBot{cacheFile: linkPath}
+	b.loadCache()
+	if len(b.cache) != 0 || len(b.docCache) != 0 || len(b.videoCache) != 0 {
+		t.Fatalf("expected cache load to skip symlink source, got cache=%d doc=%d video=%d", len(b.cache), len(b.docCache), len(b.videoCache))
 	}
 }

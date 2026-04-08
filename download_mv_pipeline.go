@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -56,8 +55,12 @@ func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDi
 	if session == nil {
 		return nil, fmt.Errorf("download session is nil")
 	}
+	normalizedMediaID, err := normalizeMediaIdentifier(mediaTypeMusicVideo, adamID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mv id")
+	}
 	cfg := &session.Config
-	mvInfo, err := ampapi.GetMusicVideoResp(storefront, adamID, cfg.Language, token)
+	mvInfo, err := ampapi.GetMusicVideoRespWithContext(session.downloadContext(), storefront, normalizedMediaID, cfg.Language, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get MV manifest: %w", err)
 	}
@@ -73,9 +76,21 @@ func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDi
 		saveDir = strings.ReplaceAll(saveDir, ".", "")
 	}
 	saveDir = strings.TrimSpace(saveDir)
-	mvSaveName := fmt.Sprintf("%s (%s)", mvData.Attributes.Name, adamID)
+	mvSaveName := fmt.Sprintf("%s (%s)", mvData.Attributes.Name, normalizedMediaID)
 	if track != nil {
 		mvSaveName = fmt.Sprintf("%02d. %s", track.TaskNum, mvData.Attributes.Name)
+	}
+	videoPath, err := joinFileWithinRoot(saveDir, fmt.Sprintf("%s_vid.mp4", normalizedMediaID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid mv video path: %w", err)
+	}
+	audioPath, err := joinFileWithinRoot(saveDir, fmt.Sprintf("%s_aud.mp4", normalizedMediaID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid mv audio path: %w", err)
+	}
+	outputPath, err := joinFileWithinRoot(saveDir, sanitizeFileBaseName(mvSaveName)+".mp4")
+	if err != nil {
+		return nil, fmt.Errorf("invalid mv output path: %w", err)
 	}
 	return &musicVideoDownloadContext{
 		session:        session,
@@ -84,14 +99,14 @@ func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDi
 		storefront:     storefront,
 		mediaUserToken: mediaUserToken,
 		track:          track,
-		mediaID:        adamID,
+		mediaID:        normalizedMediaID,
 		saveDir:        saveDir,
 		resp:           mvData,
 		genre:          mvGenre,
 		mvSaveName:     mvSaveName,
-		videoPath:      filepath.Join(saveDir, fmt.Sprintf("%s_vid.mp4", adamID)),
-		audioPath:      filepath.Join(saveDir, fmt.Sprintf("%s_aud.mp4", adamID)),
-		outputPath:     filepath.Join(saveDir, fmt.Sprintf("%s.mp4", forbiddenNames.ReplaceAllString(mvSaveName, "_"))),
+		videoPath:      videoPath,
+		audioPath:      audioPath,
+		outputPath:     outputPath,
 	}, nil
 }
 
@@ -127,7 +142,7 @@ func prepareMusicVideoWorkspaceStage(ctx *musicVideoDownloadContext) error {
 }
 
 func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
-	mvm3u8URL, _, _, err := runv3.GetWebplayback(ctx.mediaID, ctx.token, ctx.mediaUserToken, true)
+	mvm3u8URL, _, _, err := runv3.GetWebplaybackWithContext(ctx.session.downloadContext(), ctx.mediaID, ctx.token, ctx.mediaUserToken, true)
 	if err != nil {
 		return fmt.Errorf("failed to get MV playback info: %w", err)
 	}
@@ -142,14 +157,14 @@ func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
 	if strings.TrimSpace(videoM3U8URL) == "" {
 		return errors.New("failed to resolve MV video stream")
 	}
-	videoKeyAndURLs, err := runv3.Run(ctx.mediaID, videoM3U8URL, ctx.token, ctx.mediaUserToken, true, "", nil)
+	videoKeyAndURLs, err := runv3.RunWithContext(ctx.session.downloadContext(), ctx.mediaID, videoM3U8URL, ctx.token, ctx.mediaUserToken, true, "", nil)
 	if err != nil {
 		return fmt.Errorf("failed to fetch MV video segments: %w", err)
 	}
 	if strings.TrimSpace(videoKeyAndURLs) == "" {
 		return errors.New("mv video key payload is empty")
 	}
-	if err := runv3.ExtMvData(videoKeyAndURLs, ctx.videoPath); err != nil {
+	if err := runv3.ExtMvDataWithContext(ctx.session.downloadContext(), videoKeyAndURLs, ctx.videoPath); err != nil {
 		return fmt.Errorf("failed to save MV video track: %w", err)
 	}
 
@@ -160,14 +175,14 @@ func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
 	if strings.TrimSpace(audioM3U8URL) == "" {
 		return errors.New("failed to resolve MV audio stream")
 	}
-	audioKeyAndURLs, err := runv3.Run(ctx.mediaID, audioM3U8URL, ctx.token, ctx.mediaUserToken, true, "", nil)
+	audioKeyAndURLs, err := runv3.RunWithContext(ctx.session.downloadContext(), ctx.mediaID, audioM3U8URL, ctx.token, ctx.mediaUserToken, true, "", nil)
 	if err != nil {
 		return fmt.Errorf("failed to fetch MV audio segments: %w", err)
 	}
 	if strings.TrimSpace(audioKeyAndURLs) == "" {
 		return errors.New("mv audio key payload is empty")
 	}
-	if err := runv3.ExtMvData(audioKeyAndURLs, ctx.audioPath); err != nil {
+	if err := runv3.ExtMvDataWithContext(ctx.session.downloadContext(), audioKeyAndURLs, ctx.audioPath); err != nil {
 		return fmt.Errorf("failed to save MV audio track: %w", err)
 	}
 	return nil
@@ -244,7 +259,7 @@ func postProcessMusicVideoStage(ctx *musicVideoDownloadContext) error {
 	}
 
 	fmt.Printf("MV Remuxing...")
-	if _, err := runExternalCommand(context.Background(), "MP4Box", "-itags", strings.Join(tags, ":"), "-quiet", "-add", ctx.videoPath, "-add", ctx.audioPath, "-keep-utc", "-new", ctx.outputPath); err != nil {
+	if _, err := runMP4BoxWithTags(ctx.session.downloadContext(), tags, "-quiet", "-add", ctx.videoPath, "-add", ctx.audioPath, "-keep-utc", "-new", ctx.outputPath); err != nil {
 		fmt.Printf("MV mux failed: %v\n", err)
 		return err
 	}

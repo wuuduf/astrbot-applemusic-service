@@ -120,6 +120,10 @@ func AfterRequest(response *resty.Response) ([]byte, error) {
 }
 
 func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool) (string, string, string, error) {
+	return GetWebplaybackWithContext(context.Background(), adamId, authtoken, mutoken, mvmode)
+}
+
+func GetWebplaybackWithContext(ctx context.Context, adamId string, authtoken string, mutoken string, mvmode bool) (string, string, string, error) {
 	url := "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
 	postData := map[string]string{
 		"salableAdamId": adamId,
@@ -129,7 +133,7 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 		fmt.Println("Error encoding JSON:", err)
 		return "", "", "", err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(jsonData)))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
 		fmt.Println("Error creating request:", err)
 		return "", "", "", err
@@ -167,7 +171,7 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 		// 遍历 Assets
 		for i := range obj.List[0].Assets {
 			if obj.List[0].Assets[i].Flavor == "28:ctrp256" {
-				kidBase64, fileurl, uriPrefix, err := extractKidBase64(obj.List[0].Assets[i].URL, false)
+				kidBase64, fileurl, uriPrefix, err := extractKidBase64WithContext(ctx, obj.List[0].Assets[i].URL, false)
 				if err != nil {
 					return "", "", "", err
 				}
@@ -192,7 +196,11 @@ type Songlist struct {
 }
 
 func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
-	resp, err := nethttp.Get(b)
+	return extractKidBase64WithContext(context.Background(), b, mvmode)
+}
+
+func extractKidBase64WithContext(ctx context.Context, b string, mvmode bool) (string, string, string, error) {
+	resp, err := nethttp.GetWithContext(ctx, b)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -258,7 +266,11 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
 func extsong(b string, progress ProgressFunc) bytes.Buffer {
-	resp, err := nethttp.Get(b)
+	return extsongWithContext(context.Background(), b, progress)
+}
+
+func extsongWithContext(ctx context.Context, b string, progress ProgressFunc) bytes.Buffer {
+	resp, err := nethttp.GetWithContext(ctx, b)
 	var buffer bytes.Buffer
 	if err != nil {
 		fmt.Printf("下载文件失败: %v\n", err)
@@ -306,23 +318,29 @@ func extsong(b string, progress ProgressFunc) bytes.Buffer {
 	return buffer
 }
 func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmode bool, serverUrl string, progress ProgressFunc) (string, error) {
+	return RunWithContext(context.Background(), adamId, trackpath, authtoken, mutoken, mvmode, serverUrl, progress)
+}
+
+func RunWithContext(ctx context.Context, adamId string, trackpath string, authtoken string, mutoken string, mvmode bool, serverUrl string, progress ProgressFunc) (string, error) {
 	var keystr string //for mv key
 	var fileurl string
 	var kidBase64 string
 	var uriPrefix string
 	var err error
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if mvmode {
-		kidBase64, fileurl, uriPrefix, err = extractKidBase64(trackpath, true)
+		kidBase64, fileurl, uriPrefix, err = extractKidBase64WithContext(ctx, trackpath, true)
 		if err != nil {
 			return "", err
 		}
 	} else {
-		fileurl, kidBase64, uriPrefix, err = GetWebplayback(adamId, authtoken, mutoken, false)
+		fileurl, kidBase64, uriPrefix, err = GetWebplaybackWithContext(ctx, adamId, authtoken, mutoken, false)
 		if err != nil {
 			return "", err
 		}
 	}
-	ctx := context.Background()
 	ctx = context.WithValue(ctx, "pssh", kidBase64)
 	ctx = context.WithValue(ctx, "adamId", adamId)
 	ctx = context.WithValue(ctx, "uriPrefix", uriPrefix)
@@ -362,7 +380,7 @@ func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmo
 		keyAndUrls := "1:" + keystr + ";" + fileurl
 		return keyAndUrls, nil
 	}
-	body := extsong(fileurl, progress)
+	body := extsongWithContext(ctx, fileurl, progress)
 	fmt.Print("Downloaded\n")
 
 	if progress != nil {
@@ -466,6 +484,7 @@ func buildSegmentDownloadErrorSummary(total, success int, failed map[int]string)
 }
 
 func downloadSegment(
+	ctx context.Context,
 	url string,
 	index int,
 	wg *sync.WaitGroup,
@@ -484,8 +503,8 @@ func downloadSegment(
 	var lastErr string
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 		if err != nil {
 			cancel()
 			lastErr = fmt.Sprintf("创建请求失败: %v", err)
@@ -596,6 +615,13 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 }
 
 func ExtMvData(keyAndUrls string, savePath string) error {
+	return ExtMvDataWithContext(context.Background(), keyAndUrls, savePath)
+}
+
+func ExtMvDataWithContext(ctx context.Context, keyAndUrls string, savePath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	segments := strings.Split(keyAndUrls, ";")
 	key := segments[0]
 	//fmt.Println(key)
@@ -646,7 +672,7 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 
 		downloadWg.Add(1)
 		// 将 limiter 传递给下载函数
-		go downloadSegment(url, i, &downloadWg, segmentsChan, client, limiter, stats)
+		go downloadSegment(ctx, url, i, &downloadWg, segmentsChan, client, limiter, stats)
 	}
 
 	// 等待所有下载任务完成
@@ -672,7 +698,7 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	}
 	fmt.Println("\nDownloaded.")
 
-	result, err := cmdrunner.RunWithOptions(context.Background(), "mp4decrypt", []string{"--key", key, tempFile.Name(), filepath.Base(savePath)}, cmdrunner.RunOptions{
+	result, err := cmdrunner.RunWithOptions(ctx, "mp4decrypt", []string{"--key", key, tempFile.Name(), filepath.Base(savePath)}, cmdrunner.RunOptions{
 		Dir: filepath.Dir(savePath), // 设置 mp4decrypt 的工作目录以解决中文路径错误
 	})
 	if err != nil {

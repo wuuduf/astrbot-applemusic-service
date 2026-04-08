@@ -111,12 +111,19 @@ func newRunv2StreamClient() *http.Client {
 }
 
 func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc) error {
+	return RunWithContext(context.Background(), adamId, playlistUrl, outfile, Config, progress)
+}
+
+func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc) error {
 	var err error
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	idleTimeout := resolveIdleTimeout()
 	header := make(http.Header)
 
 	// request media playlist
-	req, err := http.NewRequest("GET", playlistUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", playlistUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -154,9 +161,9 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	}
 
 	// request mp4
-	ctx, cancel := context.WithCancelCause(context.Background())
+	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	req, err = http.NewRequestWithContext(ctx, "GET", fileUrl.String(), nil)
+	req, err = http.NewRequestWithContext(runCtx, "GET", fileUrl.String(), nil)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
@@ -8,6 +9,7 @@ import (
 )
 
 type Album struct {
+	Context    context.Context
 	Storefront string
 	ID         string
 
@@ -34,12 +36,17 @@ func NewAlbum(st string, id string) *Album {
 
 func (a *Album) GetResp(token, l string) error {
 	var err error
+	ctx := a.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.Language = l
-	resp, err := ampapi.GetAlbumResp(a.Storefront, a.ID, a.Language, token)
+	resp, err := ampapi.GetAlbumRespWithContext(ctx, a.Storefront, a.ID, a.Language, token)
 	if err != nil {
 		return errors.New("error getting album response")
 	}
 	a.Resp = *resp
+	a.Tracks = nil
 	albumData, err := safe.FirstRef("task.Album.GetResp", "album.data", a.Resp.Data)
 	if err != nil {
 		return err
@@ -56,6 +63,7 @@ func (a *Album) GetResp(token, l string) error {
 	for i, trackData := range tracks {
 		len := len(tracks)
 		a.Tracks = append(a.Tracks, Track{
+			Context:    ctx,
 			ID:         trackData.ID,
 			Type:       trackData.Type,
 			Name:       trackData.Attributes.Name,
