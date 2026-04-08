@@ -75,7 +75,9 @@ func (b *TelegramBot) startStateSaver() {
 				select {
 				case <-saveCh:
 					runWithRecovery("telegram saveRuntimeStateNow", nil, func() {
-						_ = b.saveRuntimeStateNow()
+						if err := b.saveRuntimeStateNow(); err != nil {
+							fmt.Printf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
+						}
 					})
 				case <-stopCh:
 					return

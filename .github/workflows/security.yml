@@ -15,8 +15,8 @@ jobs:
     - name: Verify safe defaults in tracked config
       run: |
         set -euo pipefail
-        rg -q '^media-user-token:\s*"your-media-user-token"' config.yaml
-        rg -q '^telegram-bot-token:\s*""' config.yaml
+        rg -q '^media-user-token:\s*"your-media-user-token"' config.example.yaml
+        rg -q '^telegram-bot-token:\s*""' config.example.yaml
 
     - name: Scan for Telegram bot token patterns
       run: |
@@ -25,4 +25,3 @@ jobs:
           echo "Potential Telegram bot token detected in repository content."
           exit 1
         fi
-

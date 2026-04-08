@@ -132,7 +132,10 @@ func (b *TelegramBot) saveCacheLocked() {
 	}
 	dir := filepath.Dir(b.cacheFile)
 	if dir != "." && dir != "" {
-		_ = os.MkdirAll(dir, 0755)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			fmt.Printf("telegram cache save failed (%s, mkdir): %v\n", b.cacheFile, err)
+			return
+		}
 	}
 	payload := telegramCacheFile{
 		Version:   4,
@@ -142,13 +145,17 @@ func (b *TelegramBot) saveCacheLocked() {
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
+		fmt.Printf("telegram cache save failed (%s, marshal): %v\n", b.cacheFile, err)
 		return
 	}
 	tmp := b.cacheFile + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		fmt.Printf("telegram cache save failed (%s, write tmp): %v\n", b.cacheFile, err)
 		return
 	}
-	_ = os.Rename(tmp, b.cacheFile)
+	if err := os.Rename(tmp, b.cacheFile); err != nil {
+		fmt.Printf("telegram cache save failed (%s, rename): %v\n", b.cacheFile, err)
+	}
 }
 
 func (b *TelegramBot) fetchTrackMeta(trackID string) (AudioMeta, error) {

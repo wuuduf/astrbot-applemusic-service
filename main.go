@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	sharedcatalog "github.com/wuuduf/astrbot-applemusic-service/internal/catalog"
@@ -187,7 +189,6 @@ func (s *DownloadSession) clearDownloadState() {
 	s.downloadedMetaMu.Lock()
 	s.DownloadedMeta = make(map[string]AudioMeta)
 	s.downloadedMetaMu.Unlock()
-	debug.FreeOSMemory()
 }
 
 func (s *DownloadSession) shouldDownloadStaticCover() bool {
@@ -1546,6 +1547,9 @@ type TelegramBot struct {
 	resourceGuard *telegramResourceGuard
 
 	cleanupTracker *telegramCleanupTracker
+
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 type PendingSelection struct {
@@ -1764,6 +1768,8 @@ func runTelegramBot(appleToken string) {
 	sharedstorage.ApplyTelegramStorageOverrides(&Config)
 
 	bot := newTelegramBot(botToken, appleToken)
+	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignal()
 	defer func() {
 		if bot.cleanupTracker != nil {
 			bot.cleanupTracker.stop()
@@ -1776,7 +1782,25 @@ func runTelegramBot(appleToken string) {
 	}()
 	fmt.Println("Telegram bot started. Waiting for updates...")
 	fmt.Printf("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)\n", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
-	bot.loopWithAutoRestart()
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		bot.loopWithAutoRestart()
+	}()
+
+	select {
+	case <-signalCtx.Done():
+		fmt.Println("Telegram bot shutdown requested.")
+		bot.requestShutdown()
+		closeHTTPIdleConnections(bot.pollClient)
+		closeHTTPIdleConnections(bot.client)
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+			fmt.Println("Telegram bot shutdown timed out waiting for polling loop to stop.")
+		}
+	case <-loopDone:
+	}
 }
 
 func panicErrorWithStack(scope string, rec any) error {
@@ -1813,16 +1837,26 @@ func runWithRecovery(scope string, onPanic func(error), fn func()) (panicked boo
 func (b *TelegramBot) loopWithAutoRestart() {
 	const restartDelay = 2 * time.Second
 	for {
+		if b.isShuttingDown() {
+			return
+		}
 		panicked := runWithRecovery("telegram loop", nil, func() {
 			b.loop()
 		})
 		if !panicked {
 			return
 		}
+		if b.isShuttingDown() {
+			return
+		}
 		fmt.Printf("telegram loop recovered from panic, restarting in %s\n", restartDelay)
 		closeHTTPIdleConnections(b.pollClient)
 		closeHTTPIdleConnections(b.client)
-		time.Sleep(restartDelay)
+		select {
+		case <-b.shutdownContext().Done():
+			return
+		case <-time.After(restartDelay):
+		}
 	}
 }
 
@@ -2083,6 +2117,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		pollTimeout = minTelegramPollTimeout
 	}
 	proxyFunc, proxyInfo := resolveTelegramProxy()
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	bot := &TelegramBot{
 		token:              token,
 		apiBase:            apiBase,
@@ -2107,6 +2142,8 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		inflightDownloads:  make(map[string]struct{}),
 		activeRequests:     make(map[string]telegramPersistedRequest),
 		sendLimiter:        newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
+		shutdownCtx:        shutdownCtx,
+		shutdownCancel:     shutdownCancel,
 	}
 	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.loadCache()
@@ -2136,13 +2173,22 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 
 func (b *TelegramBot) loop() {
 	if err := b.dropPendingUpdatesOnStart(); err != nil {
+		if b.isShuttingDown() {
+			return
+		}
 		fmt.Println("startup drop-pending-updates failed:", sanitizeTelegramError(err, b.token))
 	}
 	offset := b.consumePendingUpdatesOnStart()
 	lastConflictHint := time.Time{}
 	for {
+		if b.isShuttingDown() {
+			return
+		}
 		updates, err := b.getUpdates(offset)
 		if err != nil {
+			if b.isShuttingDown() {
+				return
+			}
 			msg := sanitizeTelegramError(err, b.token)
 			fmt.Println("getUpdates error:", msg)
 			lower := strings.ToLower(msg)
@@ -5522,7 +5568,7 @@ func (b *TelegramBot) getUpdates(offset int) ([]Update, error) {
 }
 
 func (b *TelegramBot) getUpdatesWithOptions(offset int, timeoutSec int, limit int) ([]Update, error) {
-	req, err := http.NewRequest("GET", b.apiURL("getUpdates"), nil)
+	req, err := http.NewRequestWithContext(b.shutdownContext(), "GET", b.apiURL("getUpdates"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -5563,6 +5609,32 @@ func (b *TelegramBot) getUpdatesWithOptions(offset int, timeoutSec int, limit in
 		return nil, fmt.Errorf("getUpdates error: %s", data.Description)
 	}
 	return data.Result, nil
+}
+
+func (b *TelegramBot) shutdownContext() context.Context {
+	if b == nil || b.shutdownCtx == nil {
+		return context.Background()
+	}
+	return b.shutdownCtx
+}
+
+func (b *TelegramBot) requestShutdown() {
+	if b == nil || b.shutdownCancel == nil {
+		return
+	}
+	b.shutdownCancel()
+}
+
+func (b *TelegramBot) isShuttingDown() bool {
+	if b == nil || b.shutdownCtx == nil {
+		return false
+	}
+	select {
+	case <-b.shutdownCtx.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *TelegramBot) apiURL(method string) string {

@@ -20,6 +20,26 @@ import (
 	"github.com/wuuduf/astrbot-applemusic-service/utils/task"
 )
 
+func captureStdoutForTest(t *testing.T, fn func()) string {
+	t.Helper()
+	original := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe failed: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		done <- string(data)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = original
+	_ = r.Close()
+	return <-done
+}
+
 func TestWriteMP4TagsMissingGenreReturnsAccessError(t *testing.T) {
 	track := &task.Track{}
 	cfg := &structs.ConfigSet{}
@@ -670,6 +690,59 @@ printf '%%s\n' "$last" >> "$log"
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected temp file %s to be removed, stat err=%v", path, err)
 		}
+	}
+}
+
+func TestTelegramCacheSaveLogsFailure(t *testing.T) {
+	b := &TelegramBot{
+		cacheFile:  "/dev/null/telegram-cache.json",
+		cache:      map[string]CachedAudio{},
+		docCache:   map[string]CachedDocument{},
+		videoCache: map[string]CachedVideo{},
+	}
+
+	out := captureStdoutForTest(t, func() {
+		b.saveCacheLocked()
+	})
+
+	if !strings.Contains(out, "telegram cache save failed") {
+		t.Fatalf("expected cache save failure log, got %q", out)
+	}
+}
+
+func TestTelegramStateSaverLogsFailure(t *testing.T) {
+	b := &TelegramBot{
+		stateFile: "/dev/null/telegram-state.json",
+		pending:   make(map[int64]map[int]*PendingSelection),
+	}
+
+	out := captureStdoutForTest(t, func() {
+		b.startStateSaver()
+		defer b.stopStateSaver()
+		b.requestStateSave()
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	if !strings.Contains(out, "telegram runtime state save failed") {
+		t.Fatalf("expected state save failure log, got %q", out)
+	}
+}
+
+func TestAstrBotExecuteDownloadWithTimeout(t *testing.T) {
+	svc := &astrbotAPIService{
+		jobTimeout: 20 * time.Millisecond,
+		executeDownloadFn: func(req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
+			time.Sleep(100 * time.Millisecond)
+			return &astrbotDownloadResult{MediaID: req.ID}, nil
+		},
+	}
+
+	_, err := svc.executeDownloadWithTimeout(astrbotDownloadRequest{ID: "job-1"})
+	if err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %v", err)
 	}
 }
 

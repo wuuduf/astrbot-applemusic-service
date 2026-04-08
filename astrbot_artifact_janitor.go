@@ -45,6 +45,11 @@ func resolveAstrBotArtifactProtectAge() time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
+func resolveAstrBotJobTimeout() time.Duration {
+	sec := resolvePositiveIntConfigEnv(0, "ASTRBOT_JOB_TIMEOUT_SEC", int(defaultAstrBotJobTimeout/time.Second))
+	return time.Duration(sec) * time.Second
+}
+
 func resolvePositiveIntConfigEnv(configValue int, envKey string, fallback int) int {
 	if configValue > 0 {
 		return configValue

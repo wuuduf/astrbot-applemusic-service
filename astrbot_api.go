@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	sharedcatalog "github.com/wuuduf/astrbot-applemusic-service/internal/catalog"
@@ -31,6 +34,8 @@ const (
 	defaultAstrBotArtifactMaxSizeMB       = 2048
 	defaultAstrBotArtifactJanitorInterval = 2 * time.Minute
 	defaultAstrBotArtifactProtectAge      = 2 * time.Minute
+	defaultAstrBotJobTimeout              = 30 * time.Minute
+	defaultAstrBotShutdownTimeout         = 10 * time.Second
 )
 
 var astrbotAPIHTTPClient = &http.Client{Timeout: 45 * time.Second}
@@ -61,6 +66,9 @@ type astrbotAPIService struct {
 	mu    sync.RWMutex
 
 	queue chan *astrbotJob
+
+	jobTimeout        time.Duration
+	executeDownloadFn func(astrbotDownloadRequest) (*astrbotDownloadResult, error)
 }
 
 type artifactPolicy struct {
@@ -233,6 +241,7 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 		artifactScope: sharedstorage.AstrBotArtifactRoot(artifactRoot),
 		jobs:          make(map[string]*astrbotJob),
 		queue:         make(chan *astrbotJob, maxAstrBotQueueCapacity),
+		jobTimeout:    resolveAstrBotJobTimeout(),
 		artifactPolicy: artifactPolicy{
 			maxAge:          resolveAstrBotArtifactMaxAge(),
 			maxBytes:        resolveAstrBotArtifactMaxBytes(),
@@ -282,7 +291,24 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 	} else {
 		fmt.Println("AstrBot API auth: enabled (Authorization: Bearer <token> or X-AstrBot-Token)")
 	}
-	return srv.ListenAndServe()
+	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignal()
+
+	go func() {
+		<-signalCtx.Done()
+		fmt.Println("AstrBot API shutdown requested.")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultAstrBotShutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Printf("AstrBot API shutdown failed: %v\n", err)
+		}
+	}()
+
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *astrbotAPIService) withRecovery(next http.Handler) http.Handler {
@@ -311,7 +337,7 @@ func (s *astrbotAPIService) startWorker() {
 					}
 				}()
 				s.setJobRunning(job.ID)
-				result, err := s.executeDownload(job.Request)
+				result, err := s.executeDownloadWithTimeout(job.Request)
 				if err != nil {
 					s.setJobFailed(job.ID, err)
 					return
@@ -320,6 +346,38 @@ func (s *astrbotAPIService) startWorker() {
 			}()
 		}
 	}()
+}
+
+func (s *astrbotAPIService) executeDownloadWithTimeout(req astrbotDownloadRequest) (*astrbotDownloadResult, error) {
+	execFn := s.executeDownload
+	if s != nil && s.executeDownloadFn != nil {
+		execFn = s.executeDownloadFn
+	}
+	if s == nil || s.jobTimeout <= 0 {
+		return execFn(req)
+	}
+
+	type downloadOutcome struct {
+		result *astrbotDownloadResult
+		err    error
+	}
+	outcomeCh := make(chan downloadOutcome, 1)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				outcomeCh <- downloadOutcome{err: fmt.Errorf("worker panic: %v", rec)}
+			}
+		}()
+		result, err := execFn(req)
+		outcomeCh <- downloadOutcome{result: result, err: err}
+	}()
+
+	select {
+	case outcome := <-outcomeCh:
+		return outcome.result, outcome.err
+	case <-time.After(s.jobTimeout):
+		return nil, fmt.Errorf("download job timed out after %s", s.jobTimeout)
+	}
 }
 
 func (s *astrbotAPIService) authorized(r *http.Request) bool {
