@@ -431,74 +431,38 @@ func getUrlSong(songUrl string, token string) (string, error) {
 	songAlbumUrl := fmt.Sprintf("https://music.apple.com/%s/album/1/%s?i=%s", storefront, albumId, songId)
 	return songAlbumUrl, nil
 }
+
+func catalogServiceForToken(token string, opPrefix string) *sharedcatalog.Service {
+	return &sharedcatalog.Service{
+		AppleToken:     token,
+		MediaUserToken: Config.MediaUserToken,
+		Language:       Config.Language,
+		HTTPClient:     networkHTTPClient,
+		UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		OpPrefix:       strings.TrimSpace(opPrefix),
+	}
+}
+
 func getUrlArtistName(artistUrl string, token string) (string, string, error) {
 	storefront, artistId := checkUrlArtist(artistUrl)
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s", storefront, artistId), nil)
+	name, _, err := catalogServiceForToken(token, "main.artist").FetchArtistProfile(storefront, artistId)
 	if err != nil {
 		return "", "", err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Origin", "https://music.apple.com")
-	query := url.Values{}
-	query.Set("l", Config.Language)
-	req.URL.RawQuery = query.Encode()
-	do, err := networkHTTPClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return "", "", errors.New(do.Status)
-	}
-	obj := new(apputils.ArtistRelationshipPage)
-	err = json.NewDecoder(do.Body).Decode(&obj)
-	if err != nil {
-		return "", "", err
-	}
-	artist, err := safe.FirstRef("main.getUrlArtistName", "artist.data", obj.Data)
-	if err != nil {
-		return "", "", err
-	}
-	return artist.Attributes.Name, artist.ID, nil
+	return name, artistId, nil
 }
 
 func checkArtist(artistUrl string, token string, relationship string) ([]string, error) {
 	storefront, artistId := checkUrlArtist(artistUrl)
-	Num := 0
-	//id := 1
 	var args []string
 	var urls []string
 	var options [][]string
-	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s?limit=100&offset=%d&l=%s", storefront, artistId, relationship, Num, Config.Language), nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-		req.Header.Set("Origin", "https://music.apple.com")
-		do, err := networkHTTPClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		if do.StatusCode != http.StatusOK {
-			do.Body.Close()
-			return nil, errors.New(do.Status)
-		}
-		obj := new(apputils.ArtistRelationshipPage)
-		err = json.NewDecoder(do.Body).Decode(&obj)
-		do.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		for _, album := range obj.Data {
-			options = append(options, []string{album.Attributes.Name, album.Attributes.ReleaseDate, album.ID, album.Attributes.URL})
-		}
-		Num = Num + 100
-		if len(obj.Next) == 0 {
-			break
-		}
+	items, err := catalogServiceForToken(token, "main.artist").FetchArtistRelationshipAll(storefront, artistId, relationship)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		options = append(options, []string{item.Name, item.ReleaseDate, item.ID, item.URL})
 	}
 	sort.Slice(options, func(i, j int) bool {
 		// 将日期字符串解析为 time.Time 类型进行比较

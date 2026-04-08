@@ -85,6 +85,40 @@ func TestFetchLyricsOnlyFallsBack(t *testing.T) {
 	}
 }
 
+func TestFetchArtistRelationshipAll(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("offset") {
+		case "", "0":
+			_, _ = io.WriteString(w, `{"next":"/v1/catalog/us/artists/artist-1/albums?offset=100","data":[{"id":"album-1","attributes":{"name":"Album One","url":"https://example.com/album-1","releaseDate":"2024-01-01","contentRating":"explicit","artistName":"Artist One","albumName":"Album One"}}]}`)
+		case "100":
+			_, _ = io.WriteString(w, `{"data":[{"id":"album-2","attributes":{"name":"Album Two","url":"https://example.com/album-2","releaseDate":"2025-01-01","artistName":"Artist One","albumName":"Album Two"}}]}`)
+		default:
+			t.Fatalf("unexpected offset query: %q", r.URL.Query().Get("offset"))
+		}
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{
+		AppleToken: "token",
+		HTTPClient: client,
+		UserAgent:  defaultUserAgent,
+	}
+
+	items, err := service.FetchArtistRelationshipAll("us", "artist-1", "albums")
+	if err != nil {
+		t.Fatalf("FetchArtistRelationshipAll failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 relationship items, got %d", len(items))
+	}
+	if items[0].ID != "album-1" || items[1].ID != "album-2" {
+		t.Fatalf("unexpected relationship items: %#v", items)
+	}
+}
+
 func TestExportAlbumLyricsWritesFilesAndCountsFailures(t *testing.T) {
 	tmpDir := t.TempDir()
 	service := &Service{
