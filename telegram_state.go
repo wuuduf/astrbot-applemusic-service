@@ -143,6 +143,7 @@ func (b *TelegramBot) trackQueuedRequest(req *downloadRequest) {
 	}
 	b.activeRequests[record.RequestID] = record
 	b.requestStateMu.Unlock()
+	appRuntimeMetrics.recordTaskQueued(record.TaskType)
 	b.requestStateSave()
 }
 
@@ -159,6 +160,7 @@ func (b *TelegramBot) markRequestRunning(requestID string) {
 	}
 	b.requestStateMu.Unlock()
 	if ok {
+		appRuntimeMetrics.recordTaskStarted(record.TaskType)
 		b.requestStateSave()
 	}
 }

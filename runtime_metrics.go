@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"sort"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -13,6 +16,9 @@ type runtimeMetrics struct {
 	externalCmdTimeouts   atomic.Uint64
 	cleanupDeletedFiles   atomic.Uint64
 	cleanupDeletedBytes   atomic.Int64
+
+	taskMu     sync.Mutex
+	taskTotals map[string]taskTypeLifecycleTotals
 }
 
 type runtimeMetricsSnapshot struct {
@@ -22,6 +28,19 @@ type runtimeMetricsSnapshot struct {
 	ExternalCmdTimeouts uint64
 	CleanupDeletedFiles uint64
 	CleanupDeletedBytes int64
+	TaskTypes           map[string]taskTypeLifecycleTotals
+}
+
+type taskTypeLifecycleTotals struct {
+	QueuedTotal   uint64
+	StartedTotal  uint64
+	FinishedTotal uint64
+	PanicTotal    uint64
+}
+
+type taskTypeCurrentStats struct {
+	QueuedCurrent  int
+	RunningCurrent int
 }
 
 var appRuntimeMetrics = &runtimeMetrics{}
@@ -64,11 +83,71 @@ func (m *runtimeMetrics) recordCleanupRemoval(size int64) {
 	}
 }
 
+func (m *runtimeMetrics) recordTaskQueued(taskType string) {
+	if m == nil {
+		return
+	}
+	m.taskMu.Lock()
+	defer m.taskMu.Unlock()
+	if m.taskTotals == nil {
+		m.taskTotals = make(map[string]taskTypeLifecycleTotals)
+	}
+	key := normalizeTelegramTaskType(taskType)
+	total := m.taskTotals[key]
+	total.QueuedTotal++
+	m.taskTotals[key] = total
+}
+
+func (m *runtimeMetrics) recordTaskStarted(taskType string) {
+	if m == nil {
+		return
+	}
+	m.taskMu.Lock()
+	defer m.taskMu.Unlock()
+	if m.taskTotals == nil {
+		m.taskTotals = make(map[string]taskTypeLifecycleTotals)
+	}
+	key := normalizeTelegramTaskType(taskType)
+	total := m.taskTotals[key]
+	total.StartedTotal++
+	m.taskTotals[key] = total
+}
+
+func (m *runtimeMetrics) recordTaskFinished(taskType string) {
+	if m == nil {
+		return
+	}
+	m.taskMu.Lock()
+	defer m.taskMu.Unlock()
+	if m.taskTotals == nil {
+		m.taskTotals = make(map[string]taskTypeLifecycleTotals)
+	}
+	key := normalizeTelegramTaskType(taskType)
+	total := m.taskTotals[key]
+	total.FinishedTotal++
+	m.taskTotals[key] = total
+}
+
+func (m *runtimeMetrics) recordTaskPanic(taskType string) {
+	if m == nil {
+		return
+	}
+	m.taskMu.Lock()
+	defer m.taskMu.Unlock()
+	if m.taskTotals == nil {
+		m.taskTotals = make(map[string]taskTypeLifecycleTotals)
+	}
+	key := normalizeTelegramTaskType(taskType)
+	total := m.taskTotals[key]
+	total.PanicTotal++
+	m.taskTotals[key] = total
+}
+
 func (m *runtimeMetrics) snapshot() runtimeMetricsSnapshot {
 	if m == nil {
 		return runtimeMetricsSnapshot{}
 	}
-	return runtimeMetricsSnapshot{
+	snapshot := runtimeMetricsSnapshot{
 		UploadSuccesses:     m.uploadSuccesses.Load(),
 		UploadFailures:      m.uploadFailures.Load(),
 		TelegramRetryAfter:  m.telegramRetryAfterHit.Load(),
@@ -76,6 +155,15 @@ func (m *runtimeMetrics) snapshot() runtimeMetricsSnapshot {
 		CleanupDeletedFiles: m.cleanupDeletedFiles.Load(),
 		CleanupDeletedBytes: m.cleanupDeletedBytes.Load(),
 	}
+	m.taskMu.Lock()
+	if len(m.taskTotals) > 0 {
+		snapshot.TaskTypes = make(map[string]taskTypeLifecycleTotals, len(m.taskTotals))
+		for taskType, totals := range m.taskTotals {
+			snapshot.TaskTypes[taskType] = totals
+		}
+	}
+	m.taskMu.Unlock()
+	return snapshot
 }
 
 func telegramMetricsInterval() time.Duration {
@@ -104,6 +192,30 @@ func (b *TelegramBot) trackedRequestCount() int {
 	return len(b.activeRequests)
 }
 
+func (b *TelegramBot) trackedRequestStatsByType() map[string]taskTypeCurrentStats {
+	if b == nil {
+		return nil
+	}
+	b.requestStateMu.Lock()
+	defer b.requestStateMu.Unlock()
+	if len(b.activeRequests) == 0 {
+		return nil
+	}
+	stats := make(map[string]taskTypeCurrentStats)
+	for _, request := range b.activeRequests {
+		taskType := normalizeTelegramTaskType(request.TaskType)
+		current := stats[taskType]
+		switch strings.TrimSpace(request.State) {
+		case "running":
+			current.RunningCurrent++
+		default:
+			current.QueuedCurrent++
+		}
+		stats[taskType] = current
+	}
+	return stats
+}
+
 func (b *TelegramBot) inflightCount() int {
 	if b == nil {
 		return 0
@@ -111,6 +223,77 @@ func (b *TelegramBot) inflightCount() int {
 	b.inflightMu.Lock()
 	defer b.inflightMu.Unlock()
 	return len(b.inflightDownloads)
+}
+
+func orderedTaskTypes(taskTotals map[string]taskTypeLifecycleTotals, current map[string]taskTypeCurrentStats) []string {
+	known := []string{
+		telegramTaskDownload,
+		telegramTaskCover,
+		telegramTaskAnimatedCover,
+		telegramTaskSongLyrics,
+		telegramTaskAlbumLyrics,
+		telegramTaskArtistAssets,
+	}
+	seen := make(map[string]struct{}, len(known))
+	ordered := make([]string, 0, len(known))
+	appendIfPresent := func(taskType string) {
+		if _, ok := seen[taskType]; ok {
+			return
+		}
+		if _, ok := taskTotals[taskType]; ok {
+			seen[taskType] = struct{}{}
+			ordered = append(ordered, taskType)
+			return
+		}
+		if _, ok := current[taskType]; ok {
+			seen[taskType] = struct{}{}
+			ordered = append(ordered, taskType)
+		}
+	}
+	for _, taskType := range known {
+		appendIfPresent(taskType)
+	}
+	extras := make([]string, 0)
+	for taskType := range taskTotals {
+		if _, ok := seen[taskType]; !ok {
+			extras = append(extras, taskType)
+		}
+	}
+	for taskType := range current {
+		if _, ok := seen[taskType]; !ok {
+			extras = append(extras, taskType)
+		}
+	}
+	sort.Strings(extras)
+	for _, taskType := range extras {
+		appendIfPresent(taskType)
+	}
+	return ordered
+}
+
+func formatTaskTypeMetrics(taskTotals map[string]taskTypeLifecycleTotals, current map[string]taskTypeCurrentStats) string {
+	if len(taskTotals) == 0 && len(current) == 0 {
+		return ""
+	}
+	parts := make([]string, 0)
+	for _, taskType := range orderedTaskTypes(taskTotals, current) {
+		total := taskTotals[taskType]
+		now := current[taskType]
+		parts = append(parts, fmt.Sprintf(
+			"%s[q=%d r=%d enq=%d start=%d done=%d panic=%d]",
+			taskType,
+			now.QueuedCurrent,
+			now.RunningCurrent,
+			total.QueuedTotal,
+			total.StartedTotal,
+			total.FinishedTotal,
+			total.PanicTotal,
+		))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " tasks=" + strings.Join(parts, ",")
 }
 
 func (b *TelegramBot) startMetricsReporter() {
@@ -163,6 +346,7 @@ func (b *TelegramBot) reportMetricsOnce() {
 	queueLen, active, limit := b.queueStats()
 	inflight := b.inflightCount()
 	tracked := b.trackedRequestCount()
+	taskCurrent := b.trackedRequestStatsByType()
 	metrics := appRuntimeMetrics.snapshot()
 	totalUploads := metrics.UploadSuccesses + metrics.UploadFailures
 	failRate := 0.0
@@ -175,8 +359,9 @@ func (b *TelegramBot) reportMetricsOnce() {
 			resourceState = fmt.Sprintf(" resource_blocked=true reason=%q", reason)
 		}
 	}
+	taskState := formatTaskTypeMetrics(metrics.TaskTypes, taskCurrent)
 	fmt.Printf(
-		"[metrics] queue=%d active=%d/%d inflight=%d tracked=%d uploads_ok=%d uploads_fail=%d upload_fail_rate=%.1f%% retry_after=%d cmd_timeout=%d cleanup_deleted=%d cleanup_bytes=%s%s\n",
+		"[metrics] queue=%d active=%d/%d inflight=%d tracked=%d uploads_ok=%d uploads_fail=%d upload_fail_rate=%.1f%% retry_after=%d cmd_timeout=%d cleanup_deleted=%d cleanup_bytes=%s%s%s\n",
 		queueLen,
 		active,
 		limit,
@@ -189,6 +374,7 @@ func (b *TelegramBot) reportMetricsOnce() {
 		metrics.ExternalCmdTimeouts,
 		metrics.CleanupDeletedFiles,
 		formatBytes(metrics.CleanupDeletedBytes),
+		taskState,
 		resourceState,
 	)
 	if totalUploads >= 5 && failRate >= 40 {

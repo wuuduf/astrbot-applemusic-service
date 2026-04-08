@@ -263,6 +263,46 @@ func TestRunExternalCommandTimeoutMetrics(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricsTaskTypeLifecycle(t *testing.T) {
+	metrics := &runtimeMetrics{}
+
+	metrics.recordTaskQueued(telegramTaskCover)
+	metrics.recordTaskStarted(telegramTaskCover)
+	metrics.recordTaskFinished(telegramTaskCover)
+	metrics.recordTaskPanic(telegramTaskCover)
+
+	snapshot := metrics.snapshot()
+	taskMetrics, ok := snapshot.TaskTypes[telegramTaskCover]
+	if !ok {
+		t.Fatalf("expected cover task metrics in snapshot")
+	}
+	if taskMetrics.QueuedTotal != 1 || taskMetrics.StartedTotal != 1 || taskMetrics.FinishedTotal != 1 || taskMetrics.PanicTotal != 1 {
+		t.Fatalf("unexpected task lifecycle metrics: %#v", taskMetrics)
+	}
+}
+
+func TestTrackedRequestStatsByType(t *testing.T) {
+	b := &TelegramBot{
+		activeRequests: map[string]telegramPersistedRequest{
+			"req-download": {TaskType: telegramTaskDownload, State: "queued"},
+			"req-cover":    {TaskType: telegramTaskCover, State: "running"},
+			"req-lyrics":   {TaskType: telegramTaskSongLyrics, State: "queued"},
+		},
+	}
+
+	stats := b.trackedRequestStatsByType()
+
+	if got := stats[telegramTaskDownload].QueuedCurrent; got != 1 {
+		t.Fatalf("expected download queued current=1, got %d", got)
+	}
+	if got := stats[telegramTaskCover].RunningCurrent; got != 1 {
+		t.Fatalf("expected cover running current=1, got %d", got)
+	}
+	if got := stats[telegramTaskSongLyrics].QueuedCurrent; got != 1 {
+		t.Fatalf("expected song-lyrics queued current=1, got %d", got)
+	}
+}
+
 func TestRunWithRecoveryRecoversPanic(t *testing.T) {
 	var callbackErr error
 	panicked := runWithRecovery("test panic", func(err error) {

@@ -2274,8 +2274,22 @@ func (b *TelegramBot) startDownloadWorker() {
 					b.activeWorkers++
 					b.queueMu.Unlock()
 
+					taskType := ""
+					if req != nil {
+						taskType = normalizeTelegramTaskType(req.taskType)
+					}
+					panicked := false
+					defer func() {
+						if panicked {
+							appRuntimeMetrics.recordTaskPanic(taskType)
+							return
+						}
+						appRuntimeMetrics.recordTaskFinished(taskType)
+					}()
+
 					defer func() {
 						if rec := recover(); rec != nil {
+							panicked = true
 							reqID := ""
 							mediaType := ""
 							mediaID := ""
