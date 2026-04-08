@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	sharedcatalog "github.com/wuuduf/astrbot-applemusic-service/internal/catalog"
 	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/cmdrunner"
@@ -5139,190 +5140,38 @@ func runExternalCommandInDir(ctx context.Context, dir string, name string, args 
 	return result, err
 }
 
+func (b *TelegramBot) catalogService() *sharedcatalog.Service {
+	return &sharedcatalog.Service{
+		AppleToken:     b.appleToken,
+		MediaUserToken: Config.MediaUserToken,
+		Language:       Config.Language,
+		HTTPClient:     b.client,
+		UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		OpPrefix:       "main.telegram",
+	}
+}
+
 func (b *TelegramBot) fetchArtistProfile(storefront string, artistID string) (string, string, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s", storefront, artistID), nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", b.appleToken))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Origin", "https://music.apple.com")
-	query := req.URL.Query()
-	if strings.TrimSpace(Config.Language) != "" {
-		query.Set("l", Config.Language)
-	}
-	req.URL.RawQuery = query.Encode()
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("artist request failed: %s", resp.Status)
-	}
-	data := artistProfileResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", "", err
-	}
-	item, err := safe.FirstRef("main.telegram.fetchArtistProfile", "artist.data", data.Data)
-	if err != nil {
-		return "", "", err
-	}
-	name := strings.TrimSpace(item.Attributes.Name)
-	coverURL := strings.TrimSpace(item.Attributes.Artwork.URL)
-	if coverURL == "" {
-		return name, "", fmt.Errorf("artist profile photo unavailable")
-	}
-	return name, coverURL, nil
+	return b.catalogService().FetchArtistProfile(storefront, artistID)
 }
 
 func (b *TelegramBot) fetchArtwork(target *AppleURLTarget) (artworkFetchResult, error) {
 	if target == nil {
 		return artworkFetchResult{}, fmt.Errorf("invalid target")
 	}
-	storefront := resolveStorefront(target)
-	switch target.MediaType {
-	case mediaTypeSong:
-		resp, err := ampapi.GetSongResp(storefront, target.ID, Config.Language, b.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstSongData("main.telegram.fetchArtwork.song", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-		}
-		if albumRef, albumErr := safe.FirstRef("main.telegram.fetchArtwork.song", "song.relationships.albums.data", item.Relationships.Albums.Data); albumErr == nil {
-			albumID := strings.TrimSpace(albumRef.ID)
-			if albumID != "" {
-				if albumResp, err := ampapi.GetAlbumResp(storefront, albumID, Config.Language, b.appleToken); err == nil {
-					albumItem, aErr := firstAlbumData("main.telegram.fetchArtwork.song.album", albumResp)
-					if aErr == nil {
-						result.MotionURL = firstNonEmpty(
-							albumItem.Attributes.EditorialVideo.MotionSquare.Video,
-							albumItem.Attributes.EditorialVideo.MotionTall.Video,
-						)
-					}
-				}
-			}
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "song-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("song cover unavailable")
-		}
-		return result, nil
-	case mediaTypeAlbum:
-		resp, err := ampapi.GetAlbumResp(storefront, target.ID, Config.Language, b.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstAlbumData("main.telegram.fetchArtwork.album", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-			MotionURL: firstNonEmpty(
-				item.Attributes.EditorialVideo.MotionSquare.Video,
-				item.Attributes.EditorialVideo.MotionTall.Video,
-			),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "album-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("album cover unavailable")
-		}
-		return result, nil
-	case mediaTypePlaylist:
-		resp, err := ampapi.GetPlaylistResp(storefront, target.ID, Config.Language, b.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstPlaylistData("main.telegram.fetchArtwork.playlist", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: strings.TrimSpace(item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-			MotionURL: firstNonEmpty(
-				item.Attributes.EditorialVideo.MotionSquare.Video,
-				item.Attributes.EditorialVideo.MotionTall.Video,
-			),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "playlist-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("playlist cover unavailable")
-		}
-		return result, nil
-	case mediaTypeStation:
-		resp, err := ampapi.GetStationResp(storefront, target.ID, Config.Language, b.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstStationData("main.telegram.fetchArtwork.station", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: strings.TrimSpace(item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-			MotionURL: firstNonEmpty(
-				item.Attributes.EditorialVideo.MotionSquare.Video,
-				item.Attributes.EditorialVideo.MotionTall.Video,
-			),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "station-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("station cover unavailable")
-		}
-		return result, nil
-	case mediaTypeMusicVideo:
-		resp, err := ampapi.GetMusicVideoResp(storefront, target.ID, Config.Language, b.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstMusicVideoData("main.telegram.fetchArtwork.musicVideo", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "music-video-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("music video cover unavailable")
-		}
-		return result, nil
-	case mediaTypeArtist:
-		name, coverURL, err := b.fetchArtistProfile(storefront, target.ID)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		if name == "" {
-			name = "artist-" + target.ID
-		}
-		return artworkFetchResult{
-			DisplayName: name,
-			CoverURL:    coverURL,
-		}, nil
-	default:
-		return artworkFetchResult{}, fmt.Errorf("unsupported type: %s", target.MediaType)
+	info, err := b.catalogService().FetchArtwork(sharedcatalog.ArtworkTarget{
+		MediaType:  target.MediaType,
+		ID:         target.ID,
+		Storefront: resolveStorefront(target),
+	})
+	if err != nil {
+		return artworkFetchResult{}, err
 	}
+	return artworkFetchResult{
+		DisplayName: info.DisplayName,
+		CoverURL:    info.CoverURL,
+		MotionURL:   info.MotionURL,
+	}, nil
 }
 
 func renderCoverToTemp(coverURL string) (string, string, error) {
@@ -5667,24 +5516,7 @@ func (b *TelegramBot) enqueueAnimatedCoverTask(chatID int64, replyToID int, targ
 }
 
 func (b *TelegramBot) fetchLyricsOnly(songID string, storefront string, outputFormat string) (string, string, error) {
-	var lastErr error
-	lyricTypes := []string{"syllable-lyrics", "lyrics"}
-	for _, lyricType := range lyricTypes {
-		content, err := lyrics.Get(storefront, songID, lyricType, Config.Language, outputFormat, b.appleToken, Config.MediaUserToken)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if strings.TrimSpace(content) == "" {
-			lastErr = fmt.Errorf("empty lyrics content")
-			continue
-		}
-		return content, lyricType, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("lyrics unavailable")
-	}
-	return "", "", lastErr
+	return b.catalogService().FetchLyricsOnly(songID, storefront, outputFormat)
 }
 
 func (b *TelegramBot) sendTextAsDocument(chatID int64, replyToID int, displayName string, ext string, content string) error {
@@ -5757,66 +5589,30 @@ func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int,
 	}
 	defer status.Stop()
 	status.Update("Loading album metadata", 0, 0)
-	albumResp, err := ampapi.GetAlbumResp(storefront, albumID, Config.Language, b.appleToken)
+	exported, err := b.catalogService().ExportAlbumLyrics("", albumID, storefront, lyricsFormat)
 	if err != nil {
-		status.UpdateSync(fmt.Sprintf("Failed to load album: %v", err), 0, 0)
-		return
-	}
-	if albumResp == nil {
-		status.UpdateSync("Album not found.", 0, 0)
-		return
-	}
-	albumData, err := firstAlbumData("main.telegram.exportAlbumLyrics", albumResp)
-	if err != nil {
-		status.UpdateSync(fmt.Sprintf("Album metadata is invalid: %v", err), 0, 0)
-		return
-	}
-	tmpDir, err := os.MkdirTemp("", "amdl-lyrics-album-*")
-	if err != nil {
-		status.UpdateSync(fmt.Sprintf("Failed to create temp directory: %v", err), 0, 0)
-		return
-	}
-	defer os.RemoveAll(tmpDir)
-	usedNames := make(map[string]struct{})
-	lyricPaths := []string{}
-	failedTracks := []string{}
-	totalTracks := len(albumData.Relationships.Tracks.Data)
-	for idx, track := range albumData.Relationships.Tracks.Data {
-		status.Update("Exporting lyrics", int64(idx), int64(totalTracks))
-		if track.ID == "" || !strings.EqualFold(track.Type, "songs") {
-			continue
-		}
-		content, _, err := b.fetchLyricsOnly(track.ID, storefront, lyricsFormat)
-		if err != nil || strings.TrimSpace(content) == "" {
-			name := track.Attributes.Name
-			if strings.TrimSpace(name) == "" {
-				name = track.ID
+		switch {
+		case errors.Is(err, sharedcatalog.ErrAlbumNotFound):
+			status.UpdateSync("Album not found.", 0, 0)
+		case errors.Is(err, sharedcatalog.ErrNoLyricsExported):
+			status.UpdateSync("No lyrics files could be exported for this album.", 0, 0)
+		default:
+			var accessErr *safe.AccessError
+			if errors.As(err, &accessErr) {
+				status.UpdateSync(fmt.Sprintf("Album metadata is invalid: %v", err), 0, 0)
+			} else {
+				status.UpdateSync(fmt.Sprintf("Failed to load album: %v", err), 0, 0)
 			}
-			failedTracks = append(failedTracks, name)
-			continue
 		}
-		baseName := sanitizeFileBaseName(composeArtistTitle(track.Attributes.ArtistName, track.Attributes.Name))
-		if baseName == "" {
-			baseName = "track-" + track.ID
-		}
-		order := track.Attributes.TrackNumber
-		if order <= 0 {
-			order = idx + 1
-		}
-		fileName := fmt.Sprintf("%02d. %s.lyrics.%s", order, baseName, lyricsFormat)
-		fileName = uniqueName(usedNames, fileName)
-		fullPath := filepath.Join(tmpDir, fileName)
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			failedTracks = append(failedTracks, baseName)
-			continue
-		}
-		lyricPaths = append(lyricPaths, fullPath)
+		return
 	}
-	status.Update("Preparing output", int64(len(lyricPaths)), int64(totalTracks))
+	lyricPaths := exported.Paths
+	failedCount := exported.FailedCount
 	if len(lyricPaths) == 0 {
 		status.UpdateSync("No lyrics files could be exported for this album.", 0, 0)
 		return
 	}
+	status.Update("Preparing output", int64(len(lyricPaths)), int64(len(lyricPaths)+failedCount))
 	if transferMode == transferModeZip {
 		zipPath, displayName, err := createZipFromPaths(lyricPaths)
 		if err != nil {
@@ -5824,7 +5620,7 @@ func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int,
 			return
 		}
 		defer os.Remove(zipPath)
-		safeAlbumName := sanitizeFileBaseName(albumData.Attributes.Name)
+		safeAlbumName := sanitizeFileBaseName(exported.AlbumName)
 		if safeAlbumName != "" {
 			displayName = safeAlbumName + ".lyrics.zip"
 		}
@@ -5843,14 +5639,14 @@ func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int,
 		for idx, lyricPath := range lyricPaths {
 			status.Update("Sending lyrics files", int64(idx), int64(len(lyricPaths)))
 			if err := b.sendDocumentFile(chatID, lyricPath, filepath.Base(lyricPath), replyToID, status, ""); err != nil {
-				failedTracks = append(failedTracks, filepath.Base(lyricPath))
+				failedCount++
 			}
 		}
 		status.Stop()
 		_ = b.deleteMessage(chatID, status.messageID)
 	}
-	if len(failedTracks) > 0 {
-		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Lyrics export completed with %d failed tracks.", len(failedTracks)), nil, replyToID)
+	if failedCount > 0 {
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Lyrics export completed with %d failed tracks.", failedCount), nil, replyToID)
 	}
 }
 

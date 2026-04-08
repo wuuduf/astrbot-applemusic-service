@@ -11,17 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	sharedcatalog "github.com/wuuduf/astrbot-applemusic-service/internal/catalog"
 	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/cmdrunner"
-	"github.com/wuuduf/astrbot-applemusic-service/utils/lyrics"
-	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 )
 
 const (
@@ -35,6 +33,17 @@ const (
 )
 
 var astrbotAPIHTTPClient = &http.Client{Timeout: 45 * time.Second}
+
+func (s *astrbotAPIService) catalogService() *sharedcatalog.Service {
+	return &sharedcatalog.Service{
+		AppleToken:     s.appleToken,
+		MediaUserToken: Config.MediaUserToken,
+		Language:       Config.Language,
+		HTTPClient:     astrbotAPIHTTPClient,
+		UserAgent:      "Mozilla/5.0",
+		OpPrefix:       "astrbot",
+	}
+}
 
 type astrbotAPIService struct {
 	appleToken   string
@@ -1215,263 +1224,41 @@ func augmentDownloadedPathsForRequest(paths []string, includeLyrics bool, includ
 }
 
 func (s *astrbotAPIService) fetchLyricsOnly(songID string, storefront string, outputFormat string) (string, string, error) {
-	var lastErr error
-	lyricTypes := []string{"syllable-lyrics", "lyrics"}
-	for _, lyricType := range lyricTypes {
-		content, err := lyrics.Get(storefront, songID, lyricType, Config.Language, outputFormat, s.appleToken, Config.MediaUserToken)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if strings.TrimSpace(content) == "" {
-			lastErr = fmt.Errorf("empty lyrics content")
-			continue
-		}
-		return content, lyricType, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("lyrics unavailable")
-	}
-	return "", "", lastErr
+	return s.catalogService().FetchLyricsOnly(songID, storefront, outputFormat)
 }
 
 func (s *astrbotAPIService) exportAlbumLyrics(albumID string, storefront string, format string) ([]string, int, error) {
-	if strings.TrimSpace(albumID) == "" {
-		return nil, 0, fmt.Errorf("album id is empty")
-	}
-	resp, err := ampapi.GetAlbumResp(storefront, albumID, Config.Language, s.appleToken)
+	exported, err := s.catalogService().ExportAlbumLyrics(s.artifactRoot, albumID, storefront, format)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to load album: %w", err)
-	}
-	if resp == nil {
-		return nil, 0, fmt.Errorf("album not found")
-	}
-	album, err := firstAlbumData("astrbot.exportAlbumLyrics", resp)
-	if err != nil {
+		if exported != nil {
+			return nil, exported.FailedCount, err
+		}
 		return nil, 0, err
 	}
-	albumDir, err := os.MkdirTemp(s.artifactRoot, "lyrics-album-*")
-	if err != nil {
-		return nil, 0, err
-	}
-	usedNames := make(map[string]struct{})
-	paths := []string{}
-	failed := 0
-	for idx, track := range album.Relationships.Tracks.Data {
-		if !strings.EqualFold(track.Type, "songs") || strings.TrimSpace(track.ID) == "" {
-			continue
-		}
-		content, _, lerr := s.fetchLyricsOnly(track.ID, storefront, format)
-		if lerr != nil || strings.TrimSpace(content) == "" {
-			failed++
-			continue
-		}
-		baseName := sanitizeFileBaseName(composeArtistTitle(track.Attributes.ArtistName, track.Attributes.Name))
-		if baseName == "" {
-			baseName = "track-" + track.ID
-		}
-		order := track.Attributes.TrackNumber
-		if order <= 0 {
-			order = idx + 1
-		}
-		fileName := fmt.Sprintf("%02d. %s.lyrics.%s", order, baseName, format)
-		fileName = uniqueName(usedNames, fileName)
-		fullPath := filepath.Join(albumDir, fileName)
-		if werr := os.WriteFile(fullPath, []byte(content), 0644); werr != nil {
-			failed++
-			continue
-		}
-		paths = append(paths, fullPath)
-	}
-	if len(paths) == 0 {
-		_ = os.RemoveAll(albumDir)
-		return nil, failed, fmt.Errorf("no lyrics exported")
-	}
-	sort.Strings(paths)
-	return paths, failed, nil
+	return exported.Paths, exported.FailedCount, nil
 }
 
 func (s *astrbotAPIService) fetchArtwork(target *AppleURLTarget) (artworkFetchResult, error) {
 	if target == nil {
 		return artworkFetchResult{}, fmt.Errorf("invalid target")
 	}
-	storefront := resolveStorefront(target)
-	switch target.MediaType {
-	case mediaTypeSong:
-		resp, err := ampapi.GetSongResp(storefront, target.ID, Config.Language, s.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstSongData("astrbot.fetchArtwork.song", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-		}
-		if albumRef, albumErr := safe.FirstRef("astrbot.fetchArtwork.song", "song.relationships.albums.data", item.Relationships.Albums.Data); albumErr == nil {
-			albumID := strings.TrimSpace(albumRef.ID)
-			if albumID != "" {
-				if albumResp, err := ampapi.GetAlbumResp(storefront, albumID, Config.Language, s.appleToken); err == nil {
-					albumData, dataErr := firstAlbumData("astrbot.fetchArtwork.song.album", albumResp)
-					if dataErr == nil {
-						result.MotionURL = firstNonEmpty(
-							albumData.Attributes.EditorialVideo.MotionSquare.Video,
-							albumData.Attributes.EditorialVideo.MotionTall.Video,
-						)
-					}
-				}
-			}
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "song-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("song cover unavailable")
-		}
-		return result, nil
-	case mediaTypeAlbum:
-		resp, err := ampapi.GetAlbumResp(storefront, target.ID, Config.Language, s.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstAlbumData("astrbot.fetchArtwork.album", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-			MotionURL: firstNonEmpty(
-				item.Attributes.EditorialVideo.MotionSquare.Video,
-				item.Attributes.EditorialVideo.MotionTall.Video,
-			),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "album-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("album cover unavailable")
-		}
-		return result, nil
-	case mediaTypePlaylist:
-		resp, err := ampapi.GetPlaylistResp(storefront, target.ID, Config.Language, s.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstPlaylistData("astrbot.fetchArtwork.playlist", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: strings.TrimSpace(item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-			MotionURL: firstNonEmpty(
-				item.Attributes.EditorialVideo.MotionSquare.Video,
-				item.Attributes.EditorialVideo.MotionTall.Video,
-			),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "playlist-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("playlist cover unavailable")
-		}
-		return result, nil
-	case mediaTypeStation:
-		resp, err := ampapi.GetStationResp(storefront, target.ID, Config.Language, s.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstStationData("astrbot.fetchArtwork.station", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: strings.TrimSpace(item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-			MotionURL: firstNonEmpty(
-				item.Attributes.EditorialVideo.MotionSquare.Video,
-				item.Attributes.EditorialVideo.MotionTall.Video,
-			),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "station-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("station cover unavailable")
-		}
-		return result, nil
-	case mediaTypeMusicVideo:
-		resp, err := ampapi.GetMusicVideoResp(storefront, target.ID, Config.Language, s.appleToken)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		item, err := firstMusicVideoData("astrbot.fetchArtwork.musicVideo", resp)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		result := artworkFetchResult{
-			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
-			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
-		}
-		if result.DisplayName == "" {
-			result.DisplayName = "music-video-" + target.ID
-		}
-		if result.CoverURL == "" {
-			return artworkFetchResult{}, fmt.Errorf("music video cover unavailable")
-		}
-		return result, nil
-	case mediaTypeArtist:
-		name, coverURL, err := s.fetchArtistProfile(storefront, target.ID)
-		if err != nil {
-			return artworkFetchResult{}, err
-		}
-		if name == "" {
-			name = "artist-" + target.ID
-		}
-		return artworkFetchResult{DisplayName: name, CoverURL: coverURL}, nil
-	default:
-		return artworkFetchResult{}, fmt.Errorf("unsupported media type: %s", target.MediaType)
+	info, err := s.catalogService().FetchArtwork(sharedcatalog.ArtworkTarget{
+		MediaType:  target.MediaType,
+		ID:         target.ID,
+		Storefront: resolveStorefront(target),
+	})
+	if err != nil {
+		return artworkFetchResult{}, err
 	}
+	return artworkFetchResult{
+		DisplayName: info.DisplayName,
+		CoverURL:    info.CoverURL,
+		MotionURL:   info.MotionURL,
+	}, nil
 }
 
 func (s *astrbotAPIService) fetchArtistProfile(storefront string, artistID string) (string, string, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s", storefront, artistID), nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.appleToken))
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.Header.Set("Origin", "https://music.apple.com")
-	query := req.URL.Query()
-	if strings.TrimSpace(Config.Language) != "" {
-		query.Set("l", Config.Language)
-	}
-	req.URL.RawQuery = query.Encode()
-	resp, err := astrbotAPIHTTPClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("artist request failed: %s", resp.Status)
-	}
-	data := artistProfileResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", "", err
-	}
-	item, err := safe.FirstRef("astrbot.fetchArtistProfile", "artist.data", data.Data)
-	if err != nil {
-		return "", "", err
-	}
-	name := strings.TrimSpace(item.Attributes.Name)
-	coverURL := strings.TrimSpace(item.Attributes.Artwork.URL)
-	if coverURL == "" {
-		return name, "", fmt.Errorf("artist profile photo unavailable")
-	}
-	return name, coverURL, nil
+	return s.catalogService().FetchArtistProfile(storefront, artistID)
 }
 
 func resolveTargetFromRequest(rawURL string, mediaType string, mediaID string, storefront string) (*AppleURLTarget, error) {

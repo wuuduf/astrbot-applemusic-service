@@ -33,5 +33,7 @@
 !.github/
 !.github/workflows/
 !.github/workflows/*
+!internal/
+!internal/**
 !utils/
 !utils/**
