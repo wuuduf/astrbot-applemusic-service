@@ -18,6 +18,7 @@ type telegramPersistedRequest struct {
 	ChatID       int64                `json:"chat_id"`
 	ReplyToID    int                  `json:"reply_to_id"`
 	Single       bool                 `json:"single"`
+	ForceRefresh bool                 `json:"force_refresh,omitempty"`
 	Settings     ChatDownloadSettings `json:"settings"`
 	TransferMode string               `json:"transfer_mode"`
 	MediaType    string               `json:"media_type"`
@@ -124,6 +125,7 @@ func (b *TelegramBot) trackQueuedRequest(req *downloadRequest) {
 		ChatID:       req.chatID,
 		ReplyToID:    req.replyToID,
 		Single:       req.single,
+		ForceRefresh: req.forceRefresh,
 		Settings:     normalizeChatSettings(req.settings),
 		TransferMode: req.transferMode,
 		MediaType:    req.mediaType,
@@ -512,6 +514,7 @@ func (b *TelegramBot) buildRecoveredDownloadRequest(request telegramPersistedReq
 		chatID:       request.ChatID,
 		replyToID:    request.ReplyToID,
 		single:       request.Single,
+		forceRefresh: request.ForceRefresh,
 		settings:     settings,
 		transferMode: transferMode,
 		mediaType:    mediaType,

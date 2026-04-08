@@ -158,13 +158,14 @@ Notes:
    - `/sr <keywords>` search artists
    - `/s <type> <keywords>` unified search (`song|album|artist`)
    - `/u <apple-music-url>` parse and download from URL
+   - `/rf <apple-music-url>` force re-download and re-upload (clear matching Telegram cache and skip local file reuse)
    - `/ap <artist-url|artist-id>` export artist profile photo + all album covers + animated covers (one-by-one or ZIP)
    - `/cv <apple-music-url>` or `/cv <song|album|playlist|station|mv|artist> <id>` download cover only
    - `/ac <apple-music-url>` or `/ac <song|album|playlist|station> <id>` download animated cover only
    - `/ly <song-url|song-id|album-url|album <id>>` export lyrics files (format from settings)
    - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip|worker1..worker4]`
    - Legacy commands are still supported for compatibility:
-   `/help /id /search_song /search_album /search_artist /search /url /artistphoto /cover /animatedcover /lyrics /settings`
+   `/help /id /search_song /search_album /search_artist /search /url /refresh /artistphoto /cover /animatedcover /lyrics /settings`
 
 8. You can also send Apple Music URLs directly in chat. The bot auto-detects:
    - `song`

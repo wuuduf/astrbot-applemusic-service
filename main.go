@@ -99,6 +99,7 @@ type DownloadSession struct {
 	DlAac               bool
 	DlSelect            bool
 	DlSong              bool
+	ForceRedownload     bool
 	Counter             structs.Counter
 	OkDict              map[string][]int
 	LastDownloadedPaths []string
@@ -197,6 +198,13 @@ func (s *DownloadSession) shouldDownloadStaticCover() bool {
 		return true
 	}
 	return s.StaticCoverDownload
+}
+
+func (s *DownloadSession) shouldReuseExistingFiles() bool {
+	if s == nil {
+		return true
+	}
+	return !s.ForceRedownload
 }
 
 type telegramCacheFile struct {
@@ -893,42 +901,44 @@ func ripTrack(session *DownloadSession, track *task.Track, token string, mediaUs
 	}
 
 	// Existence check now considers converted output (if original was deleted)
-	existsOriginal, err := fileExists(trackPath)
-	if err != nil {
-		fmt.Println("Failed to check if track exists.")
-	}
-	if existsOriginal {
-		fmt.Println("Track already exists locally.")
-		track.SavePath = trackPath
-		track.SaveName = filepath.Base(trackPath)
-		if conversionEnabled {
-			if considerConverted {
-				existsConverted, err2 := fileExists(convertedPath)
-				if err2 == nil && existsConverted {
-					track.SavePath = convertedPath
-					track.SaveName = filepath.Base(convertedPath)
+	if session.shouldReuseExistingFiles() {
+		existsOriginal, err := fileExists(trackPath)
+		if err != nil {
+			fmt.Println("Failed to check if track exists.")
+		}
+		if existsOriginal {
+			fmt.Println("Track already exists locally.")
+			track.SavePath = trackPath
+			track.SaveName = filepath.Base(trackPath)
+			if conversionEnabled {
+				if considerConverted {
+					existsConverted, err2 := fileExists(convertedPath)
+					if err2 == nil && existsConverted {
+						track.SavePath = convertedPath
+						track.SaveName = filepath.Base(convertedPath)
+					} else {
+						convertIfNeeded(session, track, lrc)
+					}
 				} else {
 					convertIfNeeded(session, track, lrc)
 				}
-			} else {
-				convertIfNeeded(session, track, lrc)
 			}
-		}
-		session.recordDownloadedTrack(track)
-		session.Counter.Success++
-		session.OkDict[track.PreID] = append(session.OkDict[track.PreID], track.TaskNum)
-		return
-	}
-	if considerConverted {
-		existsConverted, err2 := fileExists(convertedPath)
-		if err2 == nil && existsConverted {
-			fmt.Println("Converted track already exists locally.")
-			track.SavePath = convertedPath
-			track.SaveName = filepath.Base(convertedPath)
 			session.recordDownloadedTrack(track)
 			session.Counter.Success++
 			session.OkDict[track.PreID] = append(session.OkDict[track.PreID], track.TaskNum)
 			return
+		}
+		if considerConverted {
+			existsConverted, err2 := fileExists(convertedPath)
+			if err2 == nil && existsConverted {
+				fmt.Println("Converted track already exists locally.")
+				track.SavePath = convertedPath
+				track.SaveName = filepath.Base(convertedPath)
+				session.recordDownloadedTrack(track)
+				session.Counter.Success++
+				session.OkDict[track.PreID] = append(session.OkDict[track.PreID], track.TaskNum)
+				return
+			}
 		}
 	}
 
@@ -1092,9 +1102,12 @@ func ripStation(session *DownloadSession, albumId string, token string, storefro
 		if err != nil {
 			fmt.Println("no motion video square.\n", err)
 		} else {
-			exists, err := fileExists(filepath.Join(playlistFolderPath, "square_animated_artwork.mp4"))
-			if err != nil {
-				fmt.Println("Failed to check if animated artwork square exists.")
+			exists := false
+			if session.shouldReuseExistingFiles() {
+				exists, err = fileExists(filepath.Join(playlistFolderPath, "square_animated_artwork.mp4"))
+				if err != nil {
+					fmt.Println("Failed to check if animated artwork square exists.")
+				}
 			}
 			if exists {
 				fmt.Println("Animated artwork square already exists locally.")
@@ -1135,7 +1148,10 @@ func ripStation(session *DownloadSession, albumId string, token string, storefro
 		).Replace(cfg.SongFileFormat)
 		fmt.Println(songName)
 		trackPath := filepath.Join(playlistFolderPath, fmt.Sprintf("%s.m4a", forbiddenNames.ReplaceAllString(songName, "_")))
-		exists, _ := fileExists(trackPath)
+		exists := false
+		if session.shouldReuseExistingFiles() {
+			exists, _ = fileExists(trackPath)
+		}
 		if exists {
 			session.Counter.Success++
 			session.OkDict[station.ID] = append(session.OkDict[station.ID], 1)
@@ -1423,9 +1439,12 @@ func ripAlbum(session *DownloadSession, albumId string, token string, storefront
 		if err != nil {
 			fmt.Println("no motion video square.\n", err)
 		} else {
-			exists, err := fileExists(filepath.Join(albumFolderPath, "square_animated_artwork.mp4"))
-			if err != nil {
-				fmt.Println("Failed to check if animated artwork square exists.")
+			exists := false
+			if session.shouldReuseExistingFiles() {
+				exists, err = fileExists(filepath.Join(albumFolderPath, "square_animated_artwork.mp4"))
+				if err != nil {
+					fmt.Println("Failed to check if animated artwork square exists.")
+				}
 			}
 			if exists {
 				fmt.Println("Animated artwork square already exists locally.")
@@ -1449,9 +1468,12 @@ func ripAlbum(session *DownloadSession, albumId string, token string, storefront
 		if err != nil {
 			fmt.Println("no motion video tall.\n", err)
 		} else {
-			exists, err := fileExists(filepath.Join(albumFolderPath, "tall_animated_artwork.mp4"))
-			if err != nil {
-				fmt.Println("Failed to check if animated artwork tall exists.")
+			exists := false
+			if session.shouldReuseExistingFiles() {
+				exists, err = fileExists(filepath.Join(albumFolderPath, "tall_animated_artwork.mp4"))
+				if err != nil {
+					fmt.Println("Failed to check if animated artwork tall exists.")
+				}
 			}
 			if exists {
 				fmt.Println("Animated artwork tall already exists locally.")
@@ -1705,9 +1727,12 @@ func ripPlaylist(session *DownloadSession, playlistId string, token string, stor
 		if err != nil {
 			fmt.Println("no motion video square.\n", err)
 		} else {
-			exists, err := fileExists(filepath.Join(playlistFolderPath, "square_animated_artwork.mp4"))
-			if err != nil {
-				fmt.Println("Failed to check if animated artwork square exists.")
+			exists := false
+			if session.shouldReuseExistingFiles() {
+				exists, err = fileExists(filepath.Join(playlistFolderPath, "square_animated_artwork.mp4"))
+				if err != nil {
+					fmt.Println("Failed to check if animated artwork square exists.")
+				}
 			}
 			if exists {
 				fmt.Println("Animated artwork square already exists locally.")
@@ -1731,9 +1756,12 @@ func ripPlaylist(session *DownloadSession, playlistId string, token string, stor
 		if err != nil {
 			fmt.Println("no motion video tall.\n", err)
 		} else {
-			exists, err := fileExists(filepath.Join(playlistFolderPath, "tall_animated_artwork.mp4"))
-			if err != nil {
-				fmt.Println("Failed to check if animated artwork tall exists.")
+			exists := false
+			if session.shouldReuseExistingFiles() {
+				exists, err = fileExists(filepath.Join(playlistFolderPath, "tall_animated_artwork.mp4"))
+				if err != nil {
+					fmt.Println("Failed to check if animated artwork tall exists.")
+				}
 			}
 			if exists {
 				fmt.Println("Animated artwork tall already exists locally.")
@@ -2135,7 +2163,10 @@ func mvDownloader(session *DownloadSession, adamID string, saveDir string, token
 
 	fmt.Println(mvData.Attributes.Name)
 
-	exists, _ := fileExists(mvOutPath)
+	exists := false
+	if session.shouldReuseExistingFiles() {
+		exists, _ = fileExists(mvOutPath)
+	}
 	if exists {
 		fmt.Println("MV already exists locally.")
 		meta := AudioMeta{
@@ -2915,6 +2946,7 @@ type PendingTransfer struct {
 	MediaID          string
 	MediaName        string
 	Storefront       string
+	ForceRefresh     bool
 	ReplyToMessageID int
 	MessageID        int
 	CreatedAt        time.Time
@@ -2933,6 +2965,7 @@ type downloadRequest struct {
 	chatID       int64
 	replyToID    int
 	single       bool
+	forceRefresh bool
 	settings     ChatDownloadSettings
 	transferMode string
 	mediaType    string
@@ -3661,7 +3694,7 @@ func (b *TelegramBot) startDownloadWorker() {
 					if strings.TrimSpace(req.requestID) != "" {
 						b.markRequestRunning(req.requestID)
 					}
-					b.runDownload(req.chatID, req.fn, req.single, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
+					b.runDownload(req.chatID, req.fn, req.single, req.forceRefresh, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
 				}()
 			}
 		}()
@@ -4223,6 +4256,51 @@ func (b *TelegramBot) deleteCachedVideo(key string) {
 	b.saveCacheLocked()
 }
 
+func deleteCacheEntriesWithPrefix[T any](items map[string]T, prefix string) int {
+	if len(items) == 0 || strings.TrimSpace(prefix) == "" {
+		return 0
+	}
+	removed := 0
+	for key := range items {
+		if strings.HasPrefix(key, prefix) {
+			delete(items, key)
+			removed++
+		}
+	}
+	return removed
+}
+
+func (b *TelegramBot) purgeTargetCaches(target *AppleURLTarget) int {
+	if b == nil || target == nil {
+		return 0
+	}
+	mediaType := strings.TrimSpace(target.MediaType)
+	mediaID := strings.TrimSpace(target.ID)
+	if mediaType == "" || mediaID == "" {
+		return 0
+	}
+
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+
+	removed := 0
+	switch mediaType {
+	case mediaTypeSong:
+		removed += deleteCacheEntriesWithPrefix(b.cache, mediaID+"|")
+		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaTypeSong+":"+mediaID+"|")
+	case mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation:
+		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaType+":"+mediaID+"|")
+	case mediaTypeMusicVideo:
+		prefix := mediaTypeMusicVideo + ":" + mediaID + "|"
+		removed += deleteCacheEntriesWithPrefix(b.docCache, prefix)
+		removed += deleteCacheEntriesWithPrefix(b.videoCache, prefix)
+	}
+	if removed > 0 {
+		b.saveCacheLocked()
+	}
+	return removed
+}
+
 func (b *TelegramBot) getCachedAudio(trackID string, maxBytes int64, format string) (CachedAudio, bool) {
 	if trackID == "" {
 		return CachedAudio{}, false
@@ -4506,6 +4584,17 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 			return
 		}
 		b.handleURLTarget(chatID, replyToID, target)
+	case "refresh":
+		target, err := resolveRefreshURLTarget(args)
+		if err != nil {
+			_ = b.sendMessageWithReply(chatID, "Usage: /refresh <apple-music-url> OR /refresh url <apple-music-url>", nil, replyToID)
+			return
+		}
+		if target.MediaType == mediaTypeArtist {
+			_ = b.sendMessageWithReply(chatID, "refresh supports song/album/playlist/station/mv URLs only.", nil, replyToID)
+			return
+		}
+		b.handleURLTargetWithOptions(chatID, replyToID, target, true)
 	case "artistphoto":
 		target, err := resolveCommandTarget(args, mediaTypeArtist)
 		if err != nil {
@@ -4516,7 +4605,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 			_ = b.sendMessageWithReply(chatID, "artistphoto only supports artist URL/ID.", nil, replyToID)
 			return
 		}
-		b.promptMediaTransfer(chatID, mediaTypeArtistAsset, target.ID, target.Storefront, "", replyToID)
+		b.promptMediaTransfer(chatID, mediaTypeArtistAsset, target.ID, target.Storefront, "", replyToID, false)
 	case "cover":
 		target, err := resolveCommandTarget(args, "")
 		if err != nil {
@@ -4548,7 +4637,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 		case mediaTypeSong:
 			b.handleLyricsOnly(chatID, replyToID, target)
 		case mediaTypeAlbum:
-			b.promptMediaTransfer(chatID, mediaTypeAlbumLyrics, target.ID, target.Storefront, "", replyToID)
+			b.promptMediaTransfer(chatID, mediaTypeAlbumLyrics, target.ID, target.Storefront, "", replyToID, false)
 		default:
 			_ = b.sendMessageWithReply(chatID, "lyrics command supports song/album only.", nil, replyToID)
 		}
@@ -4747,27 +4836,33 @@ func normalizeTelegramBotCommand(cmd string) string {
 		return "lyrics"
 	case "st":
 		return "settings"
+	case "rf":
+		return "refresh"
 	default:
 		return cmd
 	}
 }
 
 func (b *TelegramBot) handleURLTarget(chatID int64, replyToID int, target *AppleURLTarget) {
+	b.handleURLTargetWithOptions(chatID, replyToID, target, false)
+}
+
+func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, target *AppleURLTarget, forceRefresh bool) {
 	if target == nil {
 		_ = b.sendMessageWithReply(chatID, "Invalid Apple Music URL.", nil, replyToID)
 		return
 	}
 	switch target.MediaType {
 	case mediaTypeSong:
-		b.queueDownloadSongWithStorefront(chatID, target.ID, target.Storefront, replyToID)
+		b.queueDownloadSongWithStorefrontOptions(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
 	case mediaTypeAlbum:
-		b.queueDownloadAlbumWithStorefront(chatID, target.ID, target.Storefront, replyToID)
+		b.queueDownloadAlbumWithStorefrontOptions(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
 	case mediaTypePlaylist:
-		b.queueDownloadPlaylistWithStorefront(chatID, target.ID, target.Storefront, replyToID)
+		b.queueDownloadPlaylistWithStorefrontOptions(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
 	case mediaTypeStation:
-		b.queueDownloadStationWithStorefront(chatID, target.ID, target.Storefront, replyToID)
+		b.queueDownloadStationWithStorefront(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
 	case mediaTypeMusicVideo:
-		b.queueDownloadMusicVideoWithStorefront(chatID, target.ID, target.Storefront, replyToID)
+		b.queueDownloadMusicVideoWithStorefront(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
 	case mediaTypeArtist:
 		artistName := ""
 		if target.RawURL != "" {
@@ -4859,6 +4954,28 @@ func resolveCommandTarget(args []string, defaultType string) (*AppleURLTarget, e
 		}, nil
 	}
 	return nil, fmt.Errorf("unable to resolve target")
+}
+
+func resolveRefreshURLTarget(args []string) (*AppleURLTarget, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty args")
+	}
+	trimmedArgs := args
+	if len(trimmedArgs) > 0 {
+		switch strings.ToLower(strings.TrimSpace(trimmedArgs[0])) {
+		case "url", "ulr":
+			trimmedArgs = trimmedArgs[1:]
+		}
+	}
+	if len(trimmedArgs) == 0 {
+		return nil, fmt.Errorf("missing url")
+	}
+	joined := strings.TrimSpace(strings.Join(trimmedArgs, " "))
+	raw := extractFirstAppleMusicURL(joined)
+	if raw == "" {
+		raw = strings.TrimSpace(trimmedArgs[0])
+	}
+	return parseAppleMusicURL(raw)
 }
 
 func normalizeLyricsOutputFormat(raw string) string {
@@ -5866,7 +5983,7 @@ func (b *TelegramBot) handleSelection(chatID int64, messageID int, choice int) {
 	case "album", "artist_album":
 		b.queueDownloadAlbumWithStorefront(chatID, selected.ID, storefront, replyToID)
 	case "artist_mv":
-		b.queueDownloadMusicVideoWithStorefront(chatID, selected.ID, storefront, replyToID)
+		b.queueDownloadMusicVideoWithStorefront(chatID, selected.ID, storefront, replyToID, false)
 	case "artist":
 		b.startArtistSelection(chatID, selected.ID, selected.Name, storefront, replyToID)
 	}
@@ -5918,28 +6035,40 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 
 	switch mode {
 	case transferModeOneByOne:
-		_ = b.editMessageText(chatID, messageID, "Transfer mode: one by one.", nil)
+		if pending.ForceRefresh {
+			_ = b.editMessageText(chatID, messageID, "Transfer mode: one by one (refresh).", nil)
+		} else {
+			_ = b.editMessageText(chatID, messageID, "Transfer mode: one by one.", nil)
+		}
 		if mediaType == mediaTypeSong {
-			b.enqueueSongDownload(chatID, mediaID, pending.Storefront, replyToID, transferModeOneByOne)
+			b.enqueueSongDownload(chatID, mediaID, pending.Storefront, replyToID, transferModeOneByOne, pending.ForceRefresh)
 			return
 		}
-		b.enqueueCollectionDownload(chatID, mediaType, mediaID, pending.Storefront, replyToID, transferModeOneByOne)
+		b.enqueueCollectionDownload(chatID, mediaType, mediaID, pending.Storefront, replyToID, transferModeOneByOne, pending.ForceRefresh)
 	case transferModeZip:
 		if mediaType == mediaTypeSong {
-			if b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
+			if !pending.ForceRefresh && b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
 				_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (cached).", nil)
 				return
 			}
-			_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP.", nil)
-			b.enqueueSongDownload(chatID, mediaID, pending.Storefront, replyToID, transferModeZip)
+			if pending.ForceRefresh {
+				_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (refresh).", nil)
+			} else {
+				_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP.", nil)
+			}
+			b.enqueueSongDownload(chatID, mediaID, pending.Storefront, replyToID, transferModeZip, pending.ForceRefresh)
 			return
 		}
-		if b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
+		if !pending.ForceRefresh && b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
 			_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (cached).", nil)
 			return
 		}
-		_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP.", nil)
-		b.enqueueCollectionDownload(chatID, mediaType, mediaID, pending.Storefront, replyToID, transferModeZip)
+		if pending.ForceRefresh {
+			_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (refresh).", nil)
+		} else {
+			_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP.", nil)
+		}
+		b.enqueueCollectionDownload(chatID, mediaType, mediaID, pending.Storefront, replyToID, transferModeZip, pending.ForceRefresh)
 	default:
 		_ = b.editMessageText(chatID, messageID, "Unknown transfer mode.", nil)
 	}
@@ -6093,14 +6222,18 @@ func (b *TelegramBot) noteTelegramRateLimit(err error) {
 }
 
 func (b *TelegramBot) queueDownloadSong(chatID int64, songID string) {
-	b.queueDownloadSongWithStorefront(chatID, songID, Config.Storefront, 0)
+	b.queueDownloadSongWithStorefrontOptions(chatID, songID, Config.Storefront, 0, false)
 }
 
 func (b *TelegramBot) queueDownloadSongWithReply(chatID int64, songID string, replyToID int) {
-	b.queueDownloadSongWithStorefront(chatID, songID, Config.Storefront, replyToID)
+	b.queueDownloadSongWithStorefrontOptions(chatID, songID, Config.Storefront, replyToID, false)
 }
 
 func (b *TelegramBot) queueDownloadSongWithStorefront(chatID int64, songID string, storefront string, replyToID int) {
+	b.queueDownloadSongWithStorefrontOptions(chatID, songID, storefront, replyToID, false)
+}
+
+func (b *TelegramBot) queueDownloadSongWithStorefrontOptions(chatID int64, songID string, storefront string, replyToID int, forceRefresh bool) {
 	if songID == "" {
 		_ = b.sendMessage(chatID, "Song ID is empty.", nil)
 		return
@@ -6113,20 +6246,20 @@ func (b *TelegramBot) queueDownloadSongWithStorefront(chatID int64, songID strin
 	if settings.SongZip {
 		mode = transferModeZip
 	}
-	b.enqueueSongDownload(chatID, songID, storefront, replyToID, mode)
+	b.enqueueSongDownload(chatID, songID, storefront, replyToID, mode, forceRefresh)
 }
 
-func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefront string, replyToID int, transferMode string) {
+func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefront string, replyToID int, transferMode string, forceRefresh bool) {
 	if songID == "" {
 		_ = b.sendMessage(chatID, "Song ID is empty.", nil)
 		return
 	}
 	settings := b.getChatSettings(chatID)
 	transferMode = normalizeTransferModeForMedia(transferMode, mediaTypeSong, true)
-	if transferMode == transferModeZip && b.trySendCachedBundleZip(chatID, mediaTypeSong, songID, replyToID, settings) {
+	if !forceRefresh && transferMode == transferModeZip && b.trySendCachedBundleZip(chatID, mediaTypeSong, songID, replyToID, settings) {
 		return
 	}
-	if transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
+	if !forceRefresh && transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
 		b.sendCachedSongAutoExtras(chatID, replyToID, songID, storefront, settings)
 		return
 	}
@@ -6138,7 +6271,7 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 		_ = b.sendMessageWithReply(chatID, "Same song task is already running for this chat. Please wait.", nil, replyToID)
 		return
 	}
-	if queued := b.enqueueDownload(chatID, replyToID, true, settings, transferMode, mediaTypeSong, songID, storefront, inflightKey, func(session *DownloadSession) error {
+	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferMode, mediaTypeSong, songID, storefront, inflightKey, func(session *DownloadSession) error {
 		return ripSong(session, songID, b.appleToken, storefront, session.Config.MediaUserToken)
 	}); !queued {
 		b.releaseInflightDownload(inflightKey)
@@ -6237,46 +6370,54 @@ func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, song
 }
 
 func (b *TelegramBot) queueDownloadAlbum(chatID int64, albumID string) {
-	b.queueDownloadAlbumWithStorefront(chatID, albumID, Config.Storefront, 0)
+	b.queueDownloadAlbumWithStorefrontOptions(chatID, albumID, Config.Storefront, 0, false)
 }
 
 func (b *TelegramBot) queueDownloadAlbumWithReply(chatID int64, albumID string, replyToID int) {
-	b.queueDownloadAlbumWithStorefront(chatID, albumID, Config.Storefront, replyToID)
+	b.queueDownloadAlbumWithStorefrontOptions(chatID, albumID, Config.Storefront, replyToID, false)
 }
 
 func (b *TelegramBot) queueDownloadAlbumWithStorefront(chatID int64, albumID string, storefront string, replyToID int) {
+	b.queueDownloadAlbumWithStorefrontOptions(chatID, albumID, storefront, replyToID, false)
+}
+
+func (b *TelegramBot) queueDownloadAlbumWithStorefrontOptions(chatID int64, albumID string, storefront string, replyToID int, forceRefresh bool) {
 	if albumID == "" {
 		_ = b.sendMessage(chatID, "Album ID is empty.", nil)
 		return
 	}
-	b.promptMediaTransfer(chatID, mediaTypeAlbum, albumID, storefront, "", replyToID)
+	b.promptMediaTransfer(chatID, mediaTypeAlbum, albumID, storefront, "", replyToID, forceRefresh)
 }
 
 func (b *TelegramBot) queueDownloadPlaylist(chatID int64, playlistID string) {
-	b.queueDownloadPlaylistWithStorefront(chatID, playlistID, Config.Storefront, 0)
+	b.queueDownloadPlaylistWithStorefrontOptions(chatID, playlistID, Config.Storefront, 0, false)
 }
 
 func (b *TelegramBot) queueDownloadPlaylistWithReply(chatID int64, playlistID string, replyToID int) {
-	b.queueDownloadPlaylistWithStorefront(chatID, playlistID, Config.Storefront, replyToID)
+	b.queueDownloadPlaylistWithStorefrontOptions(chatID, playlistID, Config.Storefront, replyToID, false)
 }
 
 func (b *TelegramBot) queueDownloadPlaylistWithStorefront(chatID int64, playlistID string, storefront string, replyToID int) {
+	b.queueDownloadPlaylistWithStorefrontOptions(chatID, playlistID, storefront, replyToID, false)
+}
+
+func (b *TelegramBot) queueDownloadPlaylistWithStorefrontOptions(chatID int64, playlistID string, storefront string, replyToID int, forceRefresh bool) {
 	if playlistID == "" {
 		_ = b.sendMessage(chatID, "Playlist ID is empty.", nil)
 		return
 	}
-	b.promptMediaTransfer(chatID, mediaTypePlaylist, playlistID, storefront, "", replyToID)
+	b.promptMediaTransfer(chatID, mediaTypePlaylist, playlistID, storefront, "", replyToID, forceRefresh)
 }
 
 func (b *TelegramBot) queueDownloadStation(chatID int64, stationID string) {
-	b.queueDownloadStationWithStorefront(chatID, stationID, Config.Storefront, 0)
+	b.queueDownloadStationWithStorefront(chatID, stationID, Config.Storefront, 0, false)
 }
 
 func (b *TelegramBot) queueDownloadStationWithReply(chatID int64, stationID string, replyToID int) {
-	b.queueDownloadStationWithStorefront(chatID, stationID, Config.Storefront, replyToID)
+	b.queueDownloadStationWithStorefront(chatID, stationID, Config.Storefront, replyToID, false)
 }
 
-func (b *TelegramBot) queueDownloadStationWithStorefront(chatID int64, stationID string, storefront string, replyToID int) {
+func (b *TelegramBot) queueDownloadStationWithStorefront(chatID int64, stationID string, storefront string, replyToID int, forceRefresh bool) {
 	if stationID == "" {
 		_ = b.sendMessage(chatID, "Station ID is empty.", nil)
 		return
@@ -6285,18 +6426,18 @@ func (b *TelegramBot) queueDownloadStationWithStorefront(chatID int64, stationID
 		_ = b.sendMessageWithReply(chatID, "Station download requires media-user-token in config.yaml.", nil, replyToID)
 		return
 	}
-	b.promptMediaTransfer(chatID, mediaTypeStation, stationID, storefront, "", replyToID)
+	b.promptMediaTransfer(chatID, mediaTypeStation, stationID, storefront, "", replyToID, forceRefresh)
 }
 
 func (b *TelegramBot) queueDownloadMusicVideo(chatID int64, mvID string) {
-	b.queueDownloadMusicVideoWithStorefront(chatID, mvID, Config.Storefront, 0)
+	b.queueDownloadMusicVideoWithStorefront(chatID, mvID, Config.Storefront, 0, false)
 }
 
 func (b *TelegramBot) queueDownloadMusicVideoWithReply(chatID int64, mvID string, replyToID int) {
-	b.queueDownloadMusicVideoWithStorefront(chatID, mvID, Config.Storefront, replyToID)
+	b.queueDownloadMusicVideoWithStorefront(chatID, mvID, Config.Storefront, replyToID, false)
 }
 
-func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID string, storefront string, replyToID int) {
+func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID string, storefront string, replyToID int, forceRefresh bool) {
 	if mvID == "" {
 		_ = b.sendMessage(chatID, "Music Video ID is empty.", nil)
 		return
@@ -6310,7 +6451,7 @@ func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID s
 		return
 	}
 	settings := b.getChatSettings(chatID)
-	if b.trySendCachedMusicVideo(chatID, replyToID, mvID, settings) {
+	if !forceRefresh && b.trySendCachedMusicVideo(chatID, replyToID, mvID, settings) {
 		return
 	}
 	if storefront == "" {
@@ -6325,14 +6466,14 @@ func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID s
 		_ = b.sendMessageWithReply(chatID, "Same MV task is already running for this chat. Please wait.", nil, replyToID)
 		return
 	}
-	if queued := b.enqueueDownload(chatID, replyToID, true, settings, transferModeOneByOne, mediaTypeMusicVideo, mvID, storefront, inflightKey, func(session *DownloadSession) error {
+	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferModeOneByOne, mediaTypeMusicVideo, mvID, storefront, inflightKey, func(session *DownloadSession) error {
 		return mvDownloader(session, mvID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil)
 	}); !queued {
 		b.releaseInflightDownload(inflightKey)
 	}
 }
 
-func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaID string, storefront string, mediaName string, replyToID int) {
+func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaID string, storefront string, mediaName string, replyToID int, forceRefresh bool) {
 	if mediaID == "" {
 		_ = b.sendMessage(chatID, "Media ID is empty.", nil)
 		return
@@ -6350,10 +6491,10 @@ func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaI
 	if err != nil {
 		return
 	}
-	b.setPendingTransfer(chatID, mediaType, mediaID, mediaName, storefront, replyToID, messageID)
+	b.setPendingTransfer(chatID, mediaType, mediaID, mediaName, storefront, replyToID, messageID, forceRefresh)
 }
 
-func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, mediaID string, storefront string, replyToID int, transferMode string) {
+func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, mediaID string, storefront string, replyToID int, transferMode string, forceRefresh bool) {
 	if mediaID == "" {
 		_ = b.sendMessage(chatID, "Media ID is empty.", nil)
 		return
@@ -6369,7 +6510,7 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 		return
 	}
 	enqueueWithRollback := func(fn func(session *DownloadSession) error) {
-		if queued := b.enqueueDownload(chatID, replyToID, false, settings, transferMode, mediaType, mediaID, storefront, inflightKey, fn); !queued {
+		if queued := b.enqueueDownload(chatID, replyToID, false, forceRefresh, settings, transferMode, mediaType, mediaID, storefront, inflightKey, fn); !queued {
 			b.releaseInflightDownload(inflightKey)
 		}
 	}
@@ -6392,7 +6533,7 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 	}
 }
 
-func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string, inflightKey string, fn func(session *DownloadSession) error) bool {
+func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, forceRefresh bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string, inflightKey string, fn func(session *DownloadSession) error) bool {
 	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
 	settings = normalizeChatSettings(settings)
 	if b.resourceGuard != nil {
@@ -6409,6 +6550,7 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 		chatID:       chatID,
 		replyToID:    replyToID,
 		single:       single,
+		forceRefresh: forceRefresh,
 		settings:     settings,
 		transferMode: transferMode,
 		mediaType:    mediaType,
@@ -6493,7 +6635,7 @@ func (b *TelegramBot) trySendCachedMusicVideo(chatID int64, replyToID int, mvID 
 	return false
 }
 
-func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession) error, single bool, replyToID int, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string) {
+func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession) error, single bool, forceRefresh bool, replyToID int, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string) {
 	var status *DownloadStatus
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -6535,6 +6677,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		session = newDownloadSession(Config)
 		session.resetState()
 		session.DlSelect = false
+		session.ForceRedownload = forceRefresh
 		if single {
 			session.DlSong = true
 		}
@@ -6586,6 +6729,10 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		}
 		status.UpdateSync(fmt.Sprintf("Failed: %v", coreErr), 0, 0)
 		return
+	}
+	if forceRefresh && mediaType != "" && mediaID != "" {
+		// Refresh should only drop stale Telegram file_id caches after fresh output exists.
+		b.purgeTargetCaches(&AppleURLTarget{MediaType: mediaType, ID: mediaID})
 	}
 	if b.cleanupTracker != nil {
 		b.cleanupTracker.RecordPaths(paths)
@@ -7278,11 +7425,15 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	sendPath := filePath
 	displayName := filepath.Base(filePath)
 	thumbPath := ""
+	compressedPath := ""
 	compressed := false
 	meta, hasMeta := session.getDownloadedMeta(filePath)
 	cleanup := func() {
 		if thumbPath != "" {
 			_ = os.Remove(thumbPath)
+		}
+		if compressedPath != "" {
+			_ = os.Remove(compressedPath)
 		}
 	}
 	defer cleanup()
@@ -7298,15 +7449,12 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		if status != nil {
 			status.Update("Compressing", 0, 0)
 		}
-		compressedPath, err := b.compressFlacToSize(sendPath, b.maxFileBytes)
+		compressedPath, err = b.compressFlacToSize(sendPath, b.maxFileBytes)
 		if err != nil {
 			return err
 		}
 		sendPath = compressedPath
 		compressed = true
-		cleanup = func() {
-			_ = os.Remove(compressedPath)
-		}
 		info, err = os.Stat(sendPath)
 		if err != nil {
 			return err
@@ -8048,6 +8196,7 @@ func makeTelegramThumb(coverPath string) (string, error) {
 	}
 	tmpPath := tmp.Name()
 	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return "", err
 	}
 	args := []string{
@@ -8177,6 +8326,7 @@ func makeTempFlacPath() (string, error) {
 	}
 	path := tmp.Name()
 	if err := tmp.Close(); err != nil {
+		_ = os.Remove(path)
 		return "", err
 	}
 	return path, nil
@@ -8575,7 +8725,7 @@ func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
 	b.requestStateSave()
 }
 
-func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID string, mediaName string, storefront string, replyToID int, messageID int) {
+func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID string, mediaName string, storefront string, replyToID int, messageID int, forceRefresh bool) {
 	b.transferMu.Lock()
 	if b.pendingTransfers == nil {
 		b.pendingTransfers = make(map[int64]map[int]*PendingTransfer)
@@ -8588,6 +8738,7 @@ func (b *TelegramBot) setPendingTransfer(chatID int64, mediaType string, mediaID
 		MediaID:          mediaID,
 		MediaName:        mediaName,
 		Storefront:       storefront,
+		ForceRefresh:     forceRefresh,
 		ReplyToMessageID: replyToID,
 		MessageID:        messageID,
 		CreatedAt:        time.Now(),
@@ -8866,6 +9017,7 @@ func botHelpText() string {
 /sr <关键词> 搜索艺人
 /s <类型> <关键词> 统一搜索
 /u <Apple Music 链接> 解析并下载链接
+/rf <Apple Music 链接> 强制重下并重传（清缓存，跳过本地复用）
 /ap <艺人-url|艺人-id> 导出艺人主页图+专辑封面+动态封面（逐个/ZIP）
 /cv <url|type id> 仅下载封面
 /ac <url|type id> 仅下载动态封面

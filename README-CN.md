@@ -117,13 +117,14 @@ docker run --rm -it \
    - `/sr <关键词>` 搜索艺人
    - `/s <type> <关键词>` 统一搜索（`song|album|artist`）
    - `/u <apple-music-url>` 解析并下载链接
+   - `/rf <apple-music-url>` 强制重下并重传（清理对应 Telegram 缓存并跳过本地已存在文件复用）
    - `/ap <artist-url|artist-id>` 导出艺人主页图 + 全部专辑封面 + 动态封面（逐个/ZIP）
    - `/cv <apple-music-url>` 或 `/cv <song|album|playlist|station|mv|artist> <id>` 仅下载封面
    - `/ac <apple-music-url>` 或 `/ac <song|album|playlist|station> <id>` 仅下载动态封面
    - `/ly <song-url|song-id|album-url|album <id>>` 导出歌词文件（格式由设置决定）
    - `/st [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|lyrics|cover|animated|songzip|worker1..worker4]`
    - 旧命令仍可兼容使用：
-   `/help /id /search_song /search_album /search_artist /search /url /artistphoto /cover /animatedcover /lyrics /settings`
+   `/help /id /search_song /search_album /search_artist /search /url /refresh /artistphoto /cover /animatedcover /lyrics /settings`
 
 8. 也支持直接发送 Apple Music 链接，机器人会自动识别：
    - `song`

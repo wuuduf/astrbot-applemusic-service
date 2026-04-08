@@ -51,6 +51,17 @@ func TestTelegramMediaProducesSongAudio(t *testing.T) {
 	}
 }
 
+func TestDownloadSessionShouldReuseExistingFiles(t *testing.T) {
+	session := newDownloadSession(structs.ConfigSet{})
+	if !session.shouldReuseExistingFiles() {
+		t.Fatalf("expected local file reuse by default")
+	}
+	session.ForceRedownload = true
+	if session.shouldReuseExistingFiles() {
+		t.Fatalf("expected force redownload to disable local file reuse")
+	}
+}
+
 func TestApplyTelegramAudioEmbeddingPolicy(t *testing.T) {
 	base := structs.ConfigSet{
 		LrcFormat:           "lrc",
@@ -155,8 +166,8 @@ func TestPendingTransferIsolatedByMessageID(t *testing.T) {
 		pendingTransfers: make(map[int64]map[int]*PendingTransfer),
 	}
 
-	b.setPendingTransfer(chatID, mediaTypeAlbum, "a1", "Album 1", "us", 21, 201)
-	b.setPendingTransfer(chatID, mediaTypePlaylist, "p1", "Playlist 1", "us", 22, 202)
+	b.setPendingTransfer(chatID, mediaTypeAlbum, "a1", "Album 1", "us", 21, 201, false)
+	b.setPendingTransfer(chatID, mediaTypePlaylist, "p1", "Playlist 1", "us", 22, 202, false)
 
 	pending1, ok := b.getPendingTransfer(chatID, 201)
 	if !ok {
@@ -265,6 +276,99 @@ func TestMakeDownloadInflightKeyIncludesSettings(t *testing.T) {
 	keyB := makeDownloadInflightKey(100, mediaTypeSong, "123", "us", transferModeOneByOne, base)
 	if keyA == keyB {
 		t.Fatalf("expected different keys when settings differ")
+	}
+}
+
+func TestNormalizeTelegramBotCommandRefreshAlias(t *testing.T) {
+	if got := normalizeTelegramBotCommand("rf"); got != "refresh" {
+		t.Fatalf("expected rf alias to map to refresh, got %q", got)
+	}
+}
+
+func TestResolveRefreshURLTargetSupportsURLPrefixes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "direct",
+			args: []string{"https://music.apple.com/us/song/example/123456789"},
+		},
+		{
+			name: "url-prefix",
+			args: []string{"url", "https://music.apple.com/us/song/example/123456789"},
+		},
+		{
+			name: "ulr-prefix",
+			args: []string{"ulr", "https://music.apple.com/us/song/example/123456789"},
+		},
+	}
+	for _, tt := range tests {
+		target, err := resolveRefreshURLTarget(tt.args)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tt.name, err)
+		}
+		if target.MediaType != mediaTypeSong || target.ID != "123456789" || target.Storefront != "us" {
+			t.Fatalf("%s: unexpected target: %+v", tt.name, target)
+		}
+	}
+}
+
+func TestPurgeTargetCachesSongClearsAudioAndBundleZip(t *testing.T) {
+	b := &TelegramBot{
+		cache: map[string]CachedAudio{
+			"song-1|alac|false": {FileID: "a1"},
+			"song-1|flac|true":  {FileID: "a2"},
+			"song-2|alac|false": {FileID: "a3"},
+		},
+		docCache: map[string]CachedDocument{
+			"song:song-1|profile-a|zip":   {FileID: "d1"},
+			"song:song-1|profile-b|zip":   {FileID: "d2"},
+			"album:album-1|profile-a|zip": {FileID: "d3"},
+		},
+		videoCache: map[string]CachedVideo{},
+	}
+
+	removed := b.purgeTargetCaches(&AppleURLTarget{MediaType: mediaTypeSong, ID: "song-1"})
+	if removed != 4 {
+		t.Fatalf("expected 4 removed cache entries, got %d", removed)
+	}
+	if len(b.cache) != 1 {
+		t.Fatalf("expected unrelated song cache to remain, got %#v", b.cache)
+	}
+	if _, ok := b.cache["song-2|alac|false"]; !ok {
+		t.Fatalf("expected unrelated audio cache to remain")
+	}
+	if len(b.docCache) != 1 {
+		t.Fatalf("expected unrelated bundle cache to remain, got %#v", b.docCache)
+	}
+	if _, ok := b.docCache["album:album-1|profile-a|zip"]; !ok {
+		t.Fatalf("expected unrelated album zip cache to remain")
+	}
+}
+
+func TestPurgeTargetCachesMusicVideoClearsVideoAndDocument(t *testing.T) {
+	b := &TelegramBot{
+		cache: map[string]CachedAudio{},
+		docCache: map[string]CachedDocument{
+			"music-video:mv-1|profile-a|document": {FileID: "d1"},
+			"song:song-1|profile-a|zip":           {FileID: "d2"},
+		},
+		videoCache: map[string]CachedVideo{
+			"music-video:mv-1|profile-a|video": {FileID: "v1"},
+			"music-video:mv-2|profile-a|video": {FileID: "v2"},
+		},
+	}
+
+	removed := b.purgeTargetCaches(&AppleURLTarget{MediaType: mediaTypeMusicVideo, ID: "mv-1"})
+	if removed != 2 {
+		t.Fatalf("expected 2 removed cache entries, got %d", removed)
+	}
+	if _, ok := b.docCache["song:song-1|profile-a|zip"]; !ok {
+		t.Fatalf("expected unrelated document cache to remain")
+	}
+	if _, ok := b.videoCache["music-video:mv-2|profile-a|video"]; !ok {
+		t.Fatalf("expected unrelated video cache to remain")
 	}
 }
 
