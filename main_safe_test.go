@@ -2,6 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -384,5 +392,206 @@ func TestTelegramSendLimiterNextWait(t *testing.T) {
 	expected := 3500 * time.Millisecond
 	if wait != expected {
 		t.Fatalf("wait mismatch: got %s want %s", wait, expected)
+	}
+}
+
+func makeAstrBotTestJob(id string, status astrbotJobStatus) *astrbotJob {
+	now := time.Unix(1700000000, 0)
+	return &astrbotJob{
+		ID:        id,
+		Status:    status,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+func TestAstrBotPruneJobsLockedKeepsQueuedAndRunning(t *testing.T) {
+	svc := &astrbotAPIService{
+		jobs:  make(map[string]*astrbotJob),
+		order: []string{},
+	}
+
+	svc.jobs["queued"] = makeAstrBotTestJob("queued", astrbotJobQueued)
+	svc.jobs["running"] = makeAstrBotTestJob("running", astrbotJobRunning)
+	svc.order = append(svc.order, "queued", "running")
+	for idx := 0; idx < maxAstrBotJobHistory; idx++ {
+		id := fmt.Sprintf("done-%03d", idx)
+		svc.jobs[id] = makeAstrBotTestJob(id, astrbotJobCompleted)
+		svc.order = append(svc.order, id)
+	}
+
+	svc.pruneJobsLocked()
+
+	if got := len(svc.order); got != maxAstrBotJobHistory {
+		t.Fatalf("expected %d jobs after pruning, got %d", maxAstrBotJobHistory, got)
+	}
+	if _, ok := svc.jobs["queued"]; !ok {
+		t.Fatalf("queued job should not be pruned")
+	}
+	if _, ok := svc.jobs["running"]; !ok {
+		t.Fatalf("running job should not be pruned")
+	}
+	if _, ok := svc.jobs["done-000"]; ok {
+		t.Fatalf("oldest completed job should be pruned first")
+	}
+	if _, ok := svc.jobs["done-001"]; ok {
+		t.Fatalf("second-oldest completed job should be pruned when still over limit")
+	}
+}
+
+func TestAstrBotSetJobCompletedPrunesOverflowAfterActiveBacklog(t *testing.T) {
+	svc := &astrbotAPIService{
+		jobs:  make(map[string]*astrbotJob),
+		order: []string{},
+	}
+	for idx := 0; idx < maxAstrBotJobHistory+1; idx++ {
+		id := fmt.Sprintf("job-%03d", idx)
+		svc.jobs[id] = makeAstrBotTestJob(id, astrbotJobQueued)
+		svc.order = append(svc.order, id)
+	}
+
+	svc.pruneJobsLocked()
+	if got := len(svc.order); got != maxAstrBotJobHistory+1 {
+		t.Fatalf("queued jobs must not be pruned before they finish, got %d", got)
+	}
+
+	svc.setJobCompleted("job-000", &astrbotDownloadResult{MediaID: "job-000"})
+
+	if got := len(svc.order); got != maxAstrBotJobHistory {
+		t.Fatalf("expected overflow to be pruned after completion, got %d", got)
+	}
+	if _, ok := svc.jobs["job-000"]; ok {
+		t.Fatalf("completed overflow job should be pruned once history can shrink")
+	}
+}
+
+func TestEnqueueSongDownloadForceRefreshDoesNotPurgeCachesWhenQueueIsFull(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:             "test-token",
+		apiBase:           server.URL,
+		client:            server.Client(),
+		downloadQueue:     make(chan *downloadRequest, 1),
+		workerLimit:       1,
+		cache:             map[string]CachedAudio{"song-1|alac|false": {FileID: "audio-1"}},
+		docCache:          map[string]CachedDocument{"song:song-1|profile-a|zip": {FileID: "doc-1"}},
+		videoCache:        map[string]CachedVideo{},
+		inflightDownloads: make(map[string]struct{}),
+	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
+	bot.downloadQueue <- &downloadRequest{requestID: "busy"}
+
+	bot.enqueueSongDownload(42, "song-1", "us", 0, transferModeOneByOne, true)
+
+	if _, ok := bot.cache["song-1|alac|false"]; !ok {
+		t.Fatalf("force refresh should not purge audio cache before the task is accepted")
+	}
+	if _, ok := bot.docCache["song:song-1|profile-a|zip"]; !ok {
+		t.Fatalf("force refresh should not purge bundle cache before the task is accepted")
+	}
+	if got := len(bot.inflightDownloads); got != 0 {
+		t.Fatalf("expected inflight lock rollback when queue is full, got %d entries", got)
+	}
+}
+
+func TestSendAudioFileCleansCompressedAndThumbTemps(t *testing.T) {
+	tmpDir := t.TempDir()
+	audioPath := filepath.Join(tmpDir, "track.flac")
+	if err := os.WriteFile(audioPath, []byte(strings.Repeat("A", 64)), 0644); err != nil {
+		t.Fatalf("write audio fixture: %v", err)
+	}
+	coverPath := filepath.Join(tmpDir, "cover.jpg")
+	if err := os.WriteFile(coverPath, []byte("cover"), 0644); err != nil {
+		t.Fatalf("write cover fixture: %v", err)
+	}
+
+	logPath := filepath.Join(tmpDir, "ffmpeg.log")
+	ffmpegPath := filepath.Join(tmpDir, "fake-ffmpeg")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+log=%q
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+printf '%%s\n' "$last" >> "$log"
+: > "$last"
+`, logPath)
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+
+	oldFFmpegPath := Config.FFmpegPath
+	Config.FFmpegPath = ffmpegPath
+	defer func() {
+		Config.FFmpegPath = oldFFmpegPath
+	}()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"audio-file","file_size":4}}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:        "test-token",
+		apiBase:      server.URL,
+		client:       server.Client(),
+		maxFileBytes: 8,
+	}
+	session := newDownloadSession(Config)
+	session.recordDownloadedFile(audioPath, AudioMeta{
+		TrackID:        "track-1",
+		Title:          "Song",
+		Performer:      "Artist",
+		DurationMillis: 1000,
+	})
+
+	if err := bot.sendAudioFile(session, 42, audioPath, 0, nil, telegramFormatFlac); err != nil {
+		t.Fatalf("sendAudioFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read ffmpeg log: %v", err)
+	}
+	seen := make(map[string]struct{})
+	paths := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			if _, ok := seen[line]; ok {
+				continue
+			}
+			seen[line] = struct{}{}
+			paths = append(paths, line)
+		}
+	}
+	hasCompressed := false
+	hasThumb := false
+	for _, path := range paths {
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".flac":
+			hasCompressed = true
+		case ".jpg":
+			hasThumb = true
+		}
+	}
+	if !hasCompressed || !hasThumb {
+		t.Fatalf("expected fake ffmpeg to create compressed and thumb outputs, got %q", string(data))
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected temp file %s to be removed, stat err=%v", path, err)
+		}
 	}
 }

@@ -7,9 +7,27 @@ on:
     branches: [ "main" ]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23.1'
+    - name: Test
+      run: |
+        go test -count=1 ./...
 
   build-windows:
     runs-on: windows-latest
+    needs: test
+    defaults:
+      run:
+        shell: bash
     steps:
     - uses: actions/checkout@v4
     - name: Set up Go
@@ -18,7 +36,7 @@ jobs:
         go-version: '1.23.1'
     - name: Build
       run: |
-        go build -o main.exe -v ./main.go
+        go build -o main.exe -v .
     - name: Create a new directory and copy files
       run: |
         mkdir -p alac
@@ -35,6 +53,10 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-latest
+    needs: test
+    defaults:
+      run:
+        shell: bash
     steps:
     - uses: actions/checkout@v4
     - name: Set up Go
@@ -43,7 +65,7 @@ jobs:
         go-version: '1.23.1'
     - name: Build
       run: |
-        go build -o main -v ./main.go
+        go build -o main -v .
     - name: Create a new directory and copy files
       run: |
         mkdir -p alac
@@ -60,6 +82,10 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    needs: test
+    defaults:
+      run:
+        shell: bash
     steps:
     - uses: actions/checkout@v4
     - name: Set up Go
@@ -68,7 +94,7 @@ jobs:
         go-version: '1.23.1'
     - name: Build
       run: |
-        go build -o main -v ./main.go
+        go build -o main -v .
     - name: Create a new directory and copy files
       run: |
         mkdir -p alac

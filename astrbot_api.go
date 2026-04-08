@@ -27,6 +27,7 @@ import (
 const (
 	defaultAstrBotAPIListen               = "127.0.0.1:27198"
 	maxAstrBotJobHistory                  = 300
+	maxAstrBotQueueCapacity               = 300
 	defaultAstrBotArtifactMaxAge          = 24 * time.Hour
 	defaultAstrBotArtifactMaxSizeMB       = 2048
 	defaultAstrBotArtifactJanitorInterval = 2 * time.Minute
@@ -219,7 +220,7 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 		listenAddr:   listenAddr,
 		artifactRoot: artifactRoot,
 		jobs:         make(map[string]*astrbotJob),
-		queue:        make(chan *astrbotJob, maxAstrBotJobHistory),
+		queue:        make(chan *astrbotJob, maxAstrBotQueueCapacity),
 		artifactPolicy: artifactPolicy{
 			maxAge:          resolveAstrBotArtifactMaxAge(),
 			maxBytes:        resolveAstrBotArtifactMaxBytes(),
@@ -398,12 +399,21 @@ func (s *astrbotAPIService) removeJob(id string) {
 }
 
 func (s *astrbotAPIService) pruneJobsLocked() {
-	if len(s.order) <= maxAstrBotJobHistory {
-		return
-	}
 	for len(s.order) > maxAstrBotJobHistory {
-		oldID := s.order[0]
-		s.order = s.order[1:]
+		pruneIdx := -1
+		for idx, jobID := range s.order {
+			job, ok := s.jobs[jobID]
+			if !ok || (job.Status != astrbotJobQueued && job.Status != astrbotJobRunning) {
+				pruneIdx = idx
+				break
+			}
+		}
+		if pruneIdx < 0 {
+			return
+		}
+		oldID := s.order[pruneIdx]
+		copy(s.order[pruneIdx:], s.order[pruneIdx+1:])
+		s.order = s.order[:len(s.order)-1]
 		delete(s.jobs, oldID)
 	}
 }
@@ -448,6 +458,7 @@ func (s *astrbotAPIService) setJobCompleted(id string, result *astrbotDownloadRe
 		job.Error = ""
 		job.Result = result
 		job.UpdatedAt = time.Now()
+		s.pruneJobsLocked()
 	}
 }
 
@@ -462,6 +473,7 @@ func (s *astrbotAPIService) setJobFailed(id string, err error) {
 			job.Error = "download failed"
 		}
 		job.UpdatedAt = time.Now()
+		s.pruneJobsLocked()
 	}
 }
 
