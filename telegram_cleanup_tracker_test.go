@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	sharedstorage "github.com/wuuduf/astrbot-applemusic-service/internal/storage"
 )
 
 func TestTelegramCleanupRecordPathsDoesNotTriggerFullScan(t *testing.T) {
@@ -12,7 +14,7 @@ func TestTelegramCleanupRecordPathsDoesNotTriggerFullScan(t *testing.T) {
 	root := t.TempDir()
 	path := writeSizedFileForTest(t, root, "track.m4a", 64)
 	scanCalls := 0
-	tracker := newTelegramCleanupTracker([]string{root}, "", 1024, time.Minute, time.Hour, 0)
+	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 1024, time.Minute, time.Hour, 0)
 	tracker.scanFolder = func(root string, cacheFile string) (int64, []downloadFileEntry, error) {
 		scanCalls++
 		return 0, nil, nil
@@ -27,6 +29,11 @@ func TestTelegramCleanupRecordPathsDoesNotTriggerFullScan(t *testing.T) {
 	if len(tracker.files) != 1 {
 		t.Fatalf("expected 1 tracked file, got %d", len(tracker.files))
 	}
+	for _, entry := range tracker.files {
+		if entry.owner != string(sharedstorage.OwnerTelegram) || entry.mode != string(sharedstorage.ModeDownload) {
+			t.Fatalf("expected owner/mode metadata, got %#v", entry)
+		}
+	}
 }
 
 func TestTelegramCleanupTrackerQuotaEvictionWithoutScan(t *testing.T) {
@@ -38,7 +45,7 @@ func TestTelegramCleanupTrackerQuotaEvictionWithoutScan(t *testing.T) {
 	mustChtimes(t, oldPath, now.Add(-2*time.Hour))
 	mustChtimes(t, newPath, now.Add(-1*time.Hour))
 
-	tracker := newTelegramCleanupTracker([]string{root}, "", 120, time.Minute, time.Hour, 0)
+	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 120, time.Minute, time.Hour, 0)
 	tracker.RecordPaths([]string{oldPath, newPath})
 	tracker.cleanupOnce(false)
 
@@ -58,7 +65,7 @@ func TestTelegramCleanupTrackerFallbackScan(t *testing.T) {
 	pathB := filepath.Join(root, "b.m4a")
 	removed := map[string]bool{}
 
-	tracker := newTelegramCleanupTracker([]string{root}, "", 50, time.Minute, time.Second, 0)
+	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 50, time.Minute, time.Second, 0)
 	tracker.scanFolder = func(root string, cacheFile string) (int64, []downloadFileEntry, error) {
 		return 120, []downloadFileEntry{
 			{path: pathA, size: 60, modTime: time.Now().Add(-2 * time.Hour)},
@@ -90,7 +97,7 @@ func TestTelegramCleanupTrackerJanitor(t *testing.T) {
 	mustChtimes(t, oldPath, now.Add(-2*time.Hour))
 	mustChtimes(t, newPath, now.Add(-1*time.Hour))
 
-	tracker := newTelegramCleanupTracker([]string{root}, "", 120, 20*time.Millisecond, time.Hour, 0)
+	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 120, 20*time.Millisecond, time.Hour, 0)
 	tracker.RecordPaths([]string{oldPath, newPath})
 	tracker.start()
 	defer tracker.stop()

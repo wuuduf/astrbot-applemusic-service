@@ -7,10 +7,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	sharedstorage "github.com/wuuduf/astrbot-applemusic-service/internal/storage"
 )
 
 type telegramCleanupTracker struct {
-	roots      []string
+	roots      []sharedstorage.CleanupRoot
 	cacheFile  string
 	maxBytes   int64
 	interval   time.Duration
@@ -32,9 +34,9 @@ type telegramCleanupTracker struct {
 	wg     sync.WaitGroup
 }
 
-func newTelegramCleanupTracker(roots []string, cacheFile string, maxBytes int64, interval time.Duration, scanEvery time.Duration, protectAge time.Duration) *telegramCleanupTracker {
+func newTelegramCleanupTracker(roots []sharedstorage.CleanupRoot, cacheFile string, maxBytes int64, interval time.Duration, scanEvery time.Duration, protectAge time.Duration) *telegramCleanupTracker {
 	return &telegramCleanupTracker{
-		roots:      append([]string{}, roots...),
+		roots:      append([]sharedstorage.CleanupRoot{}, roots...),
 		cacheFile:  cacheFile,
 		maxBytes:   maxBytes,
 		interval:   interval,
@@ -129,7 +131,8 @@ func (t *telegramCleanupTracker) RecordPaths(paths []string) {
 	defer t.mu.Unlock()
 	for _, path := range paths {
 		cleanPath := filepath.Clean(strings.TrimSpace(path))
-		if cleanPath == "" || !t.withinRootsLocked(cleanPath) {
+		root, ok := t.cleanupRootForPathLocked(cleanPath)
+		if cleanPath == "" || !ok {
 			continue
 		}
 		info, err := os.Stat(cleanPath)
@@ -143,6 +146,8 @@ func (t *telegramCleanupTracker) RecordPaths(paths []string) {
 			path:    cleanPath,
 			size:    info.Size(),
 			modTime: info.ModTime(),
+			owner:   string(root.Owner),
+			mode:    string(root.Mode),
 		}
 		if entry.modTime.IsZero() {
 			entry.modTime = now
@@ -224,12 +229,14 @@ func (t *telegramCleanupTracker) rebuildFromScan(now time.Time) {
 	files := make(map[string]downloadFileEntry)
 	var scanRuns int
 	for _, root := range t.roots {
-		_, entries, err := t.scanFolder(root, t.cacheFile)
+		_, entries, err := t.scanFolder(root.Path, t.cacheFile)
 		if err != nil {
 			continue
 		}
 		scanRuns++
 		for _, entry := range entries {
+			entry.owner = string(root.Owner)
+			entry.mode = string(root.Mode)
 			files[entry.path] = entry
 		}
 	}
@@ -247,12 +254,17 @@ func (t *telegramCleanupTracker) rebuildFromScan(now time.Time) {
 	}
 }
 
-func (t *telegramCleanupTracker) withinRootsLocked(path string) bool {
+func (t *telegramCleanupTracker) cleanupRootForPathLocked(path string) (sharedstorage.CleanupRoot, bool) {
 	dir := filepath.Dir(path)
 	for _, root := range t.roots {
-		if isParentDir(root, dir) {
-			return true
+		if isParentDir(root.Path, dir) {
+			return root, true
 		}
 	}
-	return false
+	return sharedstorage.CleanupRoot{}, false
+}
+
+func (t *telegramCleanupTracker) withinRootsLocked(path string) bool {
+	_, ok := t.cleanupRootForPathLocked(path)
+	return ok
 }

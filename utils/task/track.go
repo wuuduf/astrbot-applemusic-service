@@ -28,8 +28,8 @@ type Track struct {
 	PreType      string // 上级类型 专辑或者歌单
 	PreID        string // 上级ID
 	DiscTotal    int
-	AlbumData    ampapi.AlbumRespData
-	PlaylistData ampapi.PlaylistRespData
+	AlbumData    TrackAlbumData
+	PlaylistData TrackPlaylistData
 }
 
 func (t *Track) GetAlbumData(token string) error {
@@ -42,7 +42,7 @@ func (t *Track) GetAlbumData(token string) error {
 	if err != nil {
 		return err
 	}
-	t.AlbumData = *albumData
+	t.AlbumData = buildTrackAlbumData(albumData)
 	//尝试获取该track所在album的disk总数
 	len := len(albumData.Relationships.Tracks.Data)
 	if len > 0 {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	internalcli "github.com/wuuduf/astrbot-applemusic-service/internal/cli"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/runv3"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
@@ -592,7 +593,9 @@ func downloadAlbumMediaStage(ctx *albumDownloadContext) error {
 		}
 		return nil
 	}
-	selected := buildTrackSelectionStage(len(ctx.album.Tracks), ctx.session.DlSelect, ctx.album.ShowSelect)
+	selected := buildTrackSelectionStage(len(ctx.album.Tracks), ctx.session.DlSelect, func() []int {
+		return internalcli.SelectAlbumTracks(ctx.album)
+	})
 	downloadSelectedTracksStage(ctx.session, ctx.album.Tracks, ctx.albumID, selected, ctx.token, ctx.mediaUserToken)
 	return nil
 }
@@ -750,7 +753,9 @@ func preparePlaylistWorkspaceStage(ctx *playlistDownloadContext) {
 }
 
 func downloadPlaylistMediaStage(ctx *playlistDownloadContext) error {
-	selected := buildTrackSelectionStage(len(ctx.playlist.Tracks), ctx.session.DlSelect, ctx.playlist.ShowSelect)
+	selected := buildTrackSelectionStage(len(ctx.playlist.Tracks), ctx.session.DlSelect, func() []int {
+		return internalcli.SelectPlaylistTracks(ctx.playlist)
+	})
 	downloadSelectedTracksStage(ctx.session, ctx.playlist.Tracks, ctx.playlistID, selected, ctx.token, ctx.mediaUserToken)
 	return nil
 }
@@ -789,7 +794,7 @@ func resolveSongMediaStage(session *DownloadSession, songID string, token string
 	if err := track.GetAlbumData(token); err != nil {
 		return nil, err
 	}
-	track.TaskTotal = track.AlbumData.Attributes.TrackCount
+	track.TaskTotal = track.AlbumData.TrackCount
 	if track.TaskNum <= 0 {
 		track.TaskNum = songData.Attributes.TrackNumber
 	}
@@ -836,19 +841,16 @@ func buildDirectSongTrackStage(songData *ampapi.SongRespData, storefront string,
 
 func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 	albumData := &ctx.track.AlbumData
-	releaseYear, err := safe.ReleaseYear("download.prepareSongWorkspace", "album.data[0].attributes.releaseDate", albumData.Attributes.ReleaseDate)
+	releaseYear, err := safe.ReleaseYear("download.prepareSongWorkspace", "album.data[0].attributes.releaseDate", albumData.ReleaseDate)
 	if err != nil {
 		releaseYear = ""
 	}
-	artistID := ""
-	if artistRef, artistErr := safe.FirstRef("download.prepareSongWorkspace", "album.relationships.artists.data", albumData.Relationships.Artists.Data); artistErr == nil {
-		artistID = artistRef.ID
-	}
+	artistID := albumData.ArtistID
 	singerFolderName := ""
 	if ctx.cfg.ArtistFolderFormat != "" {
 		singerFolderName = strings.NewReplacer(
-			"{UrlArtistName}", LimitStringWithConfig(ctx.cfg, albumData.Attributes.ArtistName),
-			"{ArtistName}", LimitStringWithConfig(ctx.cfg, albumData.Attributes.ArtistName),
+			"{UrlArtistName}", LimitStringWithConfig(ctx.cfg, albumData.ArtistName),
+			"{ArtistName}", LimitStringWithConfig(ctx.cfg, albumData.ArtistName),
 			"{ArtistId}", artistID,
 		).Replace(ctx.cfg.ArtistFolderFormat)
 		if strings.HasSuffix(singerFolderName, ".") {
@@ -865,25 +867,25 @@ func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 		quality, ctx.codec = resolveCollectionQualityStage(ctx.session, ctx.storefront, ctx.cfg.Language, ctx.token, "album", ctx.songID, ctx.track.Resp.Attributes.AudioTraits)
 	}
 	tagParts := []string{}
-	if albumData.Attributes.IsAppleDigitalMaster || albumData.Attributes.IsMasteredForItunes {
+	if albumData.IsAppleDigitalMaster || albumData.IsMasteredForItunes {
 		if ctx.cfg.AppleMasterChoice != "" {
 			tagParts = append(tagParts, ctx.cfg.AppleMasterChoice)
 		}
 	}
-	if albumData.Attributes.ContentRating == "explicit" && ctx.cfg.ExplicitChoice != "" {
+	if albumData.ContentRating == "explicit" && ctx.cfg.ExplicitChoice != "" {
 		tagParts = append(tagParts, ctx.cfg.ExplicitChoice)
 	}
-	if albumData.Attributes.ContentRating == "clean" && ctx.cfg.CleanChoice != "" {
+	if albumData.ContentRating == "clean" && ctx.cfg.CleanChoice != "" {
 		tagParts = append(tagParts, ctx.cfg.CleanChoice)
 	}
 	albumFolder := strings.NewReplacer(
-		"{ReleaseDate}", albumData.Attributes.ReleaseDate,
+		"{ReleaseDate}", albumData.ReleaseDate,
 		"{ReleaseYear}", releaseYear,
-		"{ArtistName}", LimitStringWithConfig(ctx.cfg, albumData.Attributes.ArtistName),
-		"{AlbumName}", LimitStringWithConfig(ctx.cfg, albumData.Attributes.Name),
-		"{UPC}", albumData.Attributes.Upc,
-		"{RecordLabel}", albumData.Attributes.RecordLabel,
-		"{Copyright}", albumData.Attributes.Copyright,
+		"{ArtistName}", LimitStringWithConfig(ctx.cfg, albumData.ArtistName),
+		"{AlbumName}", LimitStringWithConfig(ctx.cfg, albumData.Name),
+		"{UPC}", albumData.Upc,
+		"{RecordLabel}", albumData.RecordLabel,
+		"{Copyright}", albumData.Copyright,
 		"{AlbumId}", ctx.track.PreID,
 		"{Quality}", quality,
 		"{Codec}", ctx.codec,
@@ -898,14 +900,14 @@ func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 	fmt.Println(albumFolder)
 
 	if ctx.cfg.SaveArtistCover {
-		if artistRef, artistErr := safe.FirstRef("download.prepareSongWorkspace", "album.relationships.artists.data", albumData.Relationships.Artists.Data); artistErr == nil && artistRef.Attributes.Artwork.Url != "" {
-			if _, err := writeCoverWithConfig(singerFolder, "folder", artistRef.Attributes.Artwork.Url, ctx.cfg); err != nil {
+		if strings.TrimSpace(albumData.ArtistArtworkURL) != "" {
+			if _, err := writeCoverWithConfig(singerFolder, "folder", albumData.ArtistArtworkURL, ctx.cfg); err != nil {
 				fmt.Println("Failed to write artist cover.")
 			}
 		}
 	}
 	if ctx.session.shouldDownloadStaticCover() {
-		covPath, err := writeCoverWithConfig(albumFolderPath, "cover", albumData.Attributes.Artwork.URL, ctx.cfg)
+		covPath, err := writeCoverWithConfig(albumFolderPath, "cover", albumData.ArtworkURL, ctx.cfg)
 		if err != nil {
 			fmt.Println("Failed to write cover.")
 		}
@@ -914,7 +916,7 @@ func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 		fmt.Println("Static cover download disabled by settings.")
 	}
 	if ctx.cfg.SaveAnimatedArtwork {
-		prepareAnimatedArtworkStage(ctx.session, albumFolderPath, albumData.Attributes.EditorialVideo.MotionDetailSquare.Video, albumData.Attributes.EditorialVideo.MotionDetailTall.Video, "Animated artwork not available for this album.")
+		prepareAnimatedArtworkStage(ctx.session, albumFolderPath, albumData.MotionDetailSquareVideo, albumData.MotionDetailTallVideo, "Animated artwork not available for this album.")
 	}
 
 	ctx.track.SaveDir = albumFolderPath

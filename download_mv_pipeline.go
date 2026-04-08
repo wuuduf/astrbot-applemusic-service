@@ -194,33 +194,33 @@ func postProcessMusicVideoStage(ctx *musicVideoDownloadContext) error {
 		if ctx.track.PreType == "playlists" && !ctx.cfg.UseSongInfoForPlaylist {
 			tags = append(tags,
 				"disk=1/1",
-				fmt.Sprintf("album=%s", ctx.track.PlaylistData.Attributes.Name),
+				fmt.Sprintf("album=%s", ctx.track.PlaylistData.Name),
 				fmt.Sprintf("track=%d", ctx.track.TaskNum),
 				fmt.Sprintf("tracknum=%d/%d", ctx.track.TaskNum, ctx.track.TaskTotal),
-				fmt.Sprintf("album_artist=%s", ctx.track.PlaylistData.Attributes.ArtistName),
+				fmt.Sprintf("album_artist=%s", ctx.track.PlaylistData.ArtistName),
 				fmt.Sprintf("performer=%s", ctx.track.Resp.Attributes.ArtistName),
 			)
 		} else if ctx.track.PreType == "playlists" && ctx.cfg.UseSongInfoForPlaylist {
 			tags = append(tags,
-				fmt.Sprintf("album=%s", ctx.track.AlbumData.Attributes.Name),
+				fmt.Sprintf("album=%s", ctx.track.AlbumData.Name),
 				fmt.Sprintf("disk=%d/%d", ctx.track.Resp.Attributes.DiscNumber, ctx.track.DiscTotal),
 				fmt.Sprintf("track=%d", ctx.track.Resp.Attributes.TrackNumber),
-				fmt.Sprintf("tracknum=%d/%d", ctx.track.Resp.Attributes.TrackNumber, ctx.track.AlbumData.Attributes.TrackCount),
-				fmt.Sprintf("album_artist=%s", ctx.track.AlbumData.Attributes.ArtistName),
+				fmt.Sprintf("tracknum=%d/%d", ctx.track.Resp.Attributes.TrackNumber, ctx.track.AlbumData.TrackCount),
+				fmt.Sprintf("album_artist=%s", ctx.track.AlbumData.ArtistName),
 				fmt.Sprintf("performer=%s", ctx.track.Resp.Attributes.ArtistName),
-				fmt.Sprintf("copyright=%s", ctx.track.AlbumData.Attributes.Copyright),
-				fmt.Sprintf("UPC=%s", ctx.track.AlbumData.Attributes.Upc),
+				fmt.Sprintf("copyright=%s", ctx.track.AlbumData.Copyright),
+				fmt.Sprintf("UPC=%s", ctx.track.AlbumData.Upc),
 			)
 		} else {
 			tags = append(tags,
-				fmt.Sprintf("album=%s", ctx.track.AlbumData.Attributes.Name),
+				fmt.Sprintf("album=%s", ctx.track.AlbumData.Name),
 				fmt.Sprintf("disk=%d/%d", ctx.track.Resp.Attributes.DiscNumber, ctx.track.DiscTotal),
 				fmt.Sprintf("track=%d", ctx.track.Resp.Attributes.TrackNumber),
-				fmt.Sprintf("tracknum=%d/%d", ctx.track.Resp.Attributes.TrackNumber, ctx.track.AlbumData.Attributes.TrackCount),
-				fmt.Sprintf("album_artist=%s", ctx.track.AlbumData.Attributes.ArtistName),
+				fmt.Sprintf("tracknum=%d/%d", ctx.track.Resp.Attributes.TrackNumber, ctx.track.AlbumData.TrackCount),
+				fmt.Sprintf("album_artist=%s", ctx.track.AlbumData.ArtistName),
 				fmt.Sprintf("performer=%s", ctx.track.Resp.Attributes.ArtistName),
-				fmt.Sprintf("copyright=%s", ctx.track.AlbumData.Attributes.Copyright),
-				fmt.Sprintf("UPC=%s", ctx.track.AlbumData.Attributes.Upc),
+				fmt.Sprintf("copyright=%s", ctx.track.AlbumData.Copyright),
+				fmt.Sprintf("UPC=%s", ctx.track.AlbumData.Upc),
 			)
 		}
 	} else {
