@@ -17,6 +17,7 @@ import (
 	"time"
 
 	sharedcatalog "github.com/wuuduf/astrbot-applemusic-service/internal/catalog"
+	sharedstorage "github.com/wuuduf/astrbot-applemusic-service/internal/storage"
 	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/cmdrunner"
@@ -46,10 +47,11 @@ func (s *astrbotAPIService) catalogService() *sharedcatalog.Service {
 }
 
 type astrbotAPIService struct {
-	appleToken   string
-	apiToken     string
-	listenAddr   string
-	artifactRoot string
+	appleToken    string
+	apiToken      string
+	listenAddr    string
+	artifactRoot  string
+	artifactScope sharedstorage.CleanupRoot
 	artifactPolicy
 	artifactState
 
@@ -224,12 +226,13 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 		return fmt.Errorf("failed to create artifact root: %w", err)
 	}
 	service := &astrbotAPIService{
-		appleToken:   token,
-		apiToken:     apiToken,
-		listenAddr:   listenAddr,
-		artifactRoot: artifactRoot,
-		jobs:         make(map[string]*astrbotJob),
-		queue:        make(chan *astrbotJob, maxAstrBotQueueCapacity),
+		appleToken:    token,
+		apiToken:      apiToken,
+		listenAddr:    listenAddr,
+		artifactRoot:  artifactRoot,
+		artifactScope: sharedstorage.AstrBotArtifactRoot(artifactRoot),
+		jobs:          make(map[string]*astrbotJob),
+		queue:         make(chan *astrbotJob, maxAstrBotQueueCapacity),
 		artifactPolicy: artifactPolicy{
 			maxAge:          resolveAstrBotArtifactMaxAge(),
 			maxBytes:        resolveAstrBotArtifactMaxBytes(),
@@ -266,7 +269,7 @@ func runAstrBotAPIServer(token string, listenAddr string) error {
 	}
 
 	fmt.Printf("AstrBot API server listening on http://%s\n", service.listenAddr)
-	fmt.Printf("AstrBot API artifact root: %s\n", service.artifactRoot)
+	fmt.Printf("AstrBot API artifact root: %s\n", service.artifactRootPath())
 	fmt.Printf(
 		"AstrBot API artifact policy: max-age=%s quota=%s janitor=%s protect-age=%s\n",
 		service.maxAge,
@@ -1228,7 +1231,7 @@ func (s *astrbotAPIService) fetchLyricsOnly(songID string, storefront string, ou
 }
 
 func (s *astrbotAPIService) exportAlbumLyrics(albumID string, storefront string, format string) ([]string, int, error) {
-	exported, err := s.catalogService().ExportAlbumLyrics(s.artifactRoot, albumID, storefront, format)
+	exported, err := s.catalogService().ExportAlbumLyrics(s.artifactRootPath(), albumID, storefront, format)
 	if err != nil {
 		if exported != nil {
 			return nil, exported.FailedCount, err
@@ -1384,6 +1387,7 @@ func detectFileKind(path string) string {
 }
 
 func (s *astrbotAPIService) persistArtifactFile(srcPath string, displayName string) (string, error) {
+	rootPath := s.artifactRootPath()
 	displayName = sanitizeFileBaseName(displayName)
 	ext := strings.ToLower(filepath.Ext(srcPath))
 	if filepath.Ext(displayName) == "" && ext != "" {
@@ -1392,9 +1396,9 @@ func (s *astrbotAPIService) persistArtifactFile(srcPath string, displayName stri
 	if displayName == "" {
 		displayName = fmt.Sprintf("artifact-%d%s", time.Now().UnixMilli(), ext)
 	}
-	targetPath := filepath.Join(s.artifactRoot, displayName)
+	targetPath := filepath.Join(rootPath, displayName)
 	if _, err := os.Stat(targetPath); err == nil {
-		targetPath = filepath.Join(s.artifactRoot, fmt.Sprintf("%d-%s", time.Now().UnixNano(), displayName))
+		targetPath = filepath.Join(rootPath, fmt.Sprintf("%d-%s", time.Now().UnixNano(), displayName))
 	}
 	s.beginArtifactIO(targetPath)
 	defer s.endArtifactIO(targetPath)
@@ -1405,6 +1409,7 @@ func (s *astrbotAPIService) persistArtifactFile(srcPath string, displayName stri
 }
 
 func (s *astrbotAPIService) writeArtifactTextFile(displayName string, content string) (string, error) {
+	rootPath := s.artifactRootPath()
 	displayName = sanitizeFileBaseName(displayName)
 	if displayName == "" {
 		displayName = fmt.Sprintf("lyrics-%d.txt", time.Now().UnixMilli())
@@ -1412,9 +1417,9 @@ func (s *astrbotAPIService) writeArtifactTextFile(displayName string, content st
 	if filepath.Ext(displayName) == "" {
 		displayName += ".txt"
 	}
-	targetPath := filepath.Join(s.artifactRoot, displayName)
+	targetPath := filepath.Join(rootPath, displayName)
 	if _, err := os.Stat(targetPath); err == nil {
-		targetPath = filepath.Join(s.artifactRoot, fmt.Sprintf("%d-%s", time.Now().UnixNano(), displayName))
+		targetPath = filepath.Join(rootPath, fmt.Sprintf("%d-%s", time.Now().UnixNano(), displayName))
 	}
 	s.beginArtifactIO(targetPath)
 	defer s.endArtifactIO(targetPath)
@@ -1442,6 +1447,20 @@ func copyFile(srcPath string, dstPath string) error {
 		return err
 	}
 	return dst.Close()
+}
+
+func (s *astrbotAPIService) artifactCleanupRoot() sharedstorage.CleanupRoot {
+	if s == nil {
+		return sharedstorage.CleanupRoot{}
+	}
+	if strings.TrimSpace(s.artifactScope.Path) != "" {
+		return s.artifactScope
+	}
+	return sharedstorage.AstrBotArtifactRoot(s.artifactRoot)
+}
+
+func (s *astrbotAPIService) artifactRootPath() string {
+	return s.artifactCleanupRoot().Path
 }
 
 func (s *astrbotAPIService) beginArtifactIO(path string) {

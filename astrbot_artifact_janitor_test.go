@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	sharedstorage "github.com/wuuduf/astrbot-applemusic-service/internal/storage"
 )
 
 func TestAstrBotArtifactCleanupAgeAndQuota(t *testing.T) {
@@ -44,6 +46,47 @@ func TestAstrBotArtifactCleanupAgeAndQuota(t *testing.T) {
 	assertFileMissing(t, aPath)
 	assertFileMissing(t, bPath)
 	assertFileExists(t, cPath)
+}
+
+func TestAstrBotArtifactCleanupUsesArtifactBoundaryMetadata(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := writeSizedFileForTest(t, root, "artifact.txt", 16)
+	now := time.Now()
+	mustChtimes(t, path, now.Add(-2*time.Minute))
+
+	svc := &astrbotAPIService{
+		artifactRoot:  root,
+		artifactScope: sharedstorage.AstrBotArtifactRoot(root),
+		artifactPolicy: artifactPolicy{
+			maxAge:     0,
+			maxBytes:   1024,
+			protectAge: 0,
+		},
+		artifactState: artifactState{
+			activeArtifactIO: make(map[string]int),
+		},
+	}
+
+	entries, err := svc.collectArtifactEntries()
+	if err != nil {
+		t.Fatalf("collectArtifactEntries failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one artifact entry, got %d", len(entries))
+	}
+	if entries[0].owner != string(sharedstorage.OwnerAstrBot) || entries[0].mode != string(sharedstorage.ModeArtifact) {
+		t.Fatalf("expected astrbot owner/mode metadata, got %#v", entries[0])
+	}
+}
+
+func TestAstrBotArtifactCleanupRootFallsBackToLegacyField(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	svc := &astrbotAPIService{artifactRoot: root}
+	if got := svc.artifactRootPath(); got != root {
+		t.Fatalf("expected artifactRoot fallback, got %q", got)
+	}
 }
 
 func TestAstrBotArtifactCleanupSkipsActiveWrite(t *testing.T) {

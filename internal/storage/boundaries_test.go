@@ -80,3 +80,10 @@ func TestCleanupRootSkipsSharedSystemTemp(t *testing.T) {
 		t.Fatalf("expected /var/tmp to be skipped, got %#v", root)
 	}
 }
+
+func TestAstrBotArtifactRoot(t *testing.T) {
+	root := AstrBotArtifactRoot("/data/astrbot-artifacts")
+	if root.Owner != OwnerAstrBot || root.Mode != ModeArtifact || root.Path != "/data/astrbot-artifacts" {
+		t.Fatalf("unexpected astrbot artifact root: %#v", root)
+	}
+}

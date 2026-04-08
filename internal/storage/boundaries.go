@@ -62,6 +62,10 @@ func TelegramCleanupRoots(cfg *structs.ConfigSet) []CleanupRoot {
 	return dedupeRoots(candidates)
 }
 
+func AstrBotArtifactRoot(root string) CleanupRoot {
+	return cleanupRoot(OwnerAstrBot, ModeArtifact, root)
+}
+
 func CleanupRootPaths(roots []CleanupRoot) []string {
 	paths := make([]string, 0, len(roots))
 	for _, root := range roots {

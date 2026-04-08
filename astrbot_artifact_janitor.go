@@ -15,6 +15,8 @@ type artifactEntry struct {
 	modTime time.Time
 	isDir   bool
 	active  bool
+	owner   string
+	mode    string
 }
 
 type artifactCleanupStats struct {
@@ -174,8 +176,12 @@ func (s *astrbotAPIService) cleanupArtifactsAt(now time.Time) artifactCleanupSta
 }
 
 func (s *astrbotAPIService) collectArtifactEntries() ([]artifactEntry, error) {
+	root := s.artifactCleanupRoot()
+	if strings.TrimSpace(root.Path) == "" {
+		return nil, nil
+	}
 	result := []artifactEntry{}
-	err := filepath.WalkDir(s.artifactRoot, func(path string, d os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(root.Path, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -195,6 +201,8 @@ func (s *astrbotAPIService) collectArtifactEntries() ([]artifactEntry, error) {
 			modTime: info.ModTime(),
 			isDir:   false,
 			active:  s.isArtifactIOActive(path),
+			owner:   string(root.Owner),
+			mode:    string(root.Mode),
 		})
 		return nil
 	})
