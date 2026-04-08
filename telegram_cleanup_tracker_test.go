@@ -47,6 +47,9 @@ func TestTelegramCleanupTrackerQuotaEvictionWithoutScan(t *testing.T) {
 
 	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 120, time.Minute, time.Hour, 0)
 	tracker.RecordPaths([]string{oldPath, newPath})
+	tracker.mu.Lock()
+	tracker.lastScan = now
+	tracker.mu.Unlock()
 	tracker.cleanupOnce(false)
 
 	assertFileMissing(t, oldPath)
@@ -56,6 +59,30 @@ func TestTelegramCleanupTrackerQuotaEvictionWithoutScan(t *testing.T) {
 		t.Fatalf("expected zero fallback scans, got %d", tracker.scanRuns)
 	}
 	tracker.mu.Unlock()
+}
+
+func TestTelegramCleanupTrackerShouldScanBeforeFirstRebuildEvenWithTrackedFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := writeSizedFileForTest(t, root, "fresh.m4a", 64)
+	now := time.Now()
+
+	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 1024, time.Minute, time.Hour, 0)
+	tracker.RecordPaths([]string{path})
+
+	tracker.mu.Lock()
+	hasTrackedFiles := len(tracker.files) > 0
+	lastScan := tracker.lastScan
+	tracker.mu.Unlock()
+	if !hasTrackedFiles {
+		t.Fatalf("expected tracked files after RecordPaths")
+	}
+	if !lastScan.IsZero() {
+		t.Fatalf("expected zero lastScan before first rebuild, got %v", lastScan)
+	}
+	if !tracker.shouldScan(now) {
+		t.Fatalf("expected first scan to run even when files were already recorded")
+	}
 }
 
 func TestTelegramCleanupTrackerFallbackScan(t *testing.T) {
@@ -98,7 +125,7 @@ func TestTelegramCleanupTrackerJanitor(t *testing.T) {
 	mustChtimes(t, newPath, now.Add(-1*time.Hour))
 
 	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 120, 20*time.Millisecond, time.Hour, 0)
-	tracker.RecordPaths([]string{oldPath, newPath})
+	tracker.RecordPaths([]string{newPath})
 	tracker.start()
 	defer tracker.stop()
 
@@ -106,9 +133,18 @@ func TestTelegramCleanupTrackerJanitor(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(oldPath); os.IsNotExist(err) {
 			assertFileExists(t, newPath)
+			tracker.mu.Lock()
+			scanRuns := tracker.scanRuns
+			tracker.mu.Unlock()
+			if scanRuns == 0 {
+				t.Fatalf("expected first janitor tick to rebuild from scan")
+			}
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("expected janitor to evict old file")
+	tracker.mu.Lock()
+	scanRuns := tracker.scanRuns
+	tracker.mu.Unlock()
+	t.Fatalf("expected janitor to evict old file after startup scan, scanRuns=%d", scanRuns)
 }

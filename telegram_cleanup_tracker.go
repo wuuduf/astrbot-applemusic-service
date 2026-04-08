@@ -216,11 +216,11 @@ func (t *telegramCleanupTracker) shouldScan(now time.Time) bool {
 	if t.scanEvery <= 0 {
 		return false
 	}
-	if len(t.files) == 0 {
+	if t.lastScan.IsZero() {
 		return true
 	}
-	if t.lastScan.IsZero() {
-		return false
+	if len(t.files) == 0 {
+		return true
 	}
 	return now.Sub(t.lastScan) >= t.scanEvery
 }
