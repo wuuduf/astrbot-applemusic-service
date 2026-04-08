@@ -14,6 +14,7 @@ import (
 	"time"
 
 	apputils "github.com/wuuduf/astrbot-applemusic-service/utils"
+	"github.com/wuuduf/astrbot-applemusic-service/utils/ampapi"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/safe"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/structs"
 	"github.com/wuuduf/astrbot-applemusic-service/utils/task"
@@ -669,5 +670,67 @@ printf '%%s\n' "$last" >> "$log"
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected temp file %s to be removed, stat err=%v", path, err)
 		}
+	}
+}
+
+func TestBuildDirectSongTrackStage(t *testing.T) {
+	songData := &ampapi.SongRespData{
+		ID:   "song-1",
+		Type: "songs",
+		Href: "/v1/catalog/us/songs/song-1",
+	}
+	songData.Attributes.Name = "Song Name"
+	songData.Attributes.ArtistName = "Artist Name"
+	songData.Attributes.TrackNumber = 3
+	songData.Attributes.ExtendedAssetUrls.EnhancedHls = "https://example.com/song.m3u8"
+
+	track, err := buildDirectSongTrackStage(songData, "us", "en-US", "album-1")
+	if err != nil {
+		t.Fatalf("buildDirectSongTrackStage failed: %v", err)
+	}
+	if track.ID != "song-1" || track.PreID != "album-1" || track.PreType != "albums" {
+		t.Fatalf("unexpected track identity: %+v", track)
+	}
+	if track.TaskNum != 3 {
+		t.Fatalf("expected task num from song track number, got %d", track.TaskNum)
+	}
+	if track.WebM3u8 != "https://example.com/song.m3u8" {
+		t.Fatalf("unexpected m3u8: %q", track.WebM3u8)
+	}
+	if track.Resp.Attributes.Name != "Song Name" || track.Resp.Attributes.ArtistName != "Artist Name" {
+		t.Fatalf("unexpected track resp data: %+v", track.Resp.Attributes)
+	}
+}
+
+func TestAssignTrackWorkspaceStage(t *testing.T) {
+	tracks := []task.Track{
+		{ID: "1"},
+		{ID: "2"},
+	}
+
+	assignTrackWorkspaceStage(tracks, "/tmp/music", "/tmp/music/cover.jpg", "ALAC")
+
+	for _, track := range tracks {
+		if track.SaveDir != "/tmp/music" {
+			t.Fatalf("unexpected save dir for track %s: %q", track.ID, track.SaveDir)
+		}
+		if track.CoverPath != "/tmp/music/cover.jpg" {
+			t.Fatalf("unexpected cover path for track %s: %q", track.ID, track.CoverPath)
+		}
+		if track.Codec != "ALAC" {
+			t.Fatalf("unexpected codec for track %s: %q", track.ID, track.Codec)
+		}
+	}
+}
+
+func TestBuildTrackSelectionStage(t *testing.T) {
+	all := buildTrackSelectionStage(3, false, nil)
+	if want := []int{1, 2, 3}; len(all) != len(want) || all[0] != 1 || all[2] != 3 {
+		t.Fatalf("unexpected default selection: %#v", all)
+	}
+
+	custom := buildTrackSelectionStage(4, true, func() []int { return []int{2, 4} })
+	if len(custom) != 2 || custom[0] != 2 || custom[1] != 4 {
+		t.Fatalf("unexpected custom selection: %#v", custom)
 	}
 }
