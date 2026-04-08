@@ -18,6 +18,9 @@
 !download_track_pipeline.go
 !download_collection_pipeline.go
 !download_mv_pipeline.go
+!media_tagging.go
+!telegram_cache.go
+!telegram_uploads.go
 !main_safe_test.go
 !astrbot_api.go
 !astrbot_artifact_janitor.go
