@@ -2821,6 +2821,15 @@ const (
 	mediaTypeArtistAsset = "artist-asset"
 )
 
+const (
+	telegramTaskDownload      = "download"
+	telegramTaskCover         = "cover"
+	telegramTaskAnimatedCover = "animated-cover"
+	telegramTaskSongLyrics    = "song-lyrics"
+	telegramTaskAlbumLyrics   = "album-lyrics"
+	telegramTaskArtistAssets  = "artist-assets"
+)
+
 type ChatDownloadSettings struct {
 	Format         string
 	AACType        string
@@ -2844,6 +2853,25 @@ func normalizeTransferModeForMedia(transferMode string, mediaType string, single
 		return transferModeOneByOne
 	}
 	return transferMode
+}
+
+func normalizeTelegramTaskType(taskType string) string {
+	switch strings.TrimSpace(taskType) {
+	case "", telegramTaskDownload:
+		return telegramTaskDownload
+	case telegramTaskCover:
+		return telegramTaskCover
+	case telegramTaskAnimatedCover:
+		return telegramTaskAnimatedCover
+	case telegramTaskSongLyrics:
+		return telegramTaskSongLyrics
+	case telegramTaskAlbumLyrics:
+		return telegramTaskAlbumLyrics
+	case telegramTaskArtistAssets:
+		return telegramTaskArtistAssets
+	default:
+		return strings.TrimSpace(taskType)
+	}
 }
 
 func telegramMediaProducesSongAudio(mediaType string) bool {
@@ -2966,6 +2994,7 @@ type downloadRequest struct {
 	replyToID    int
 	single       bool
 	forceRefresh bool
+	taskType     string
 	settings     ChatDownloadSettings
 	transferMode string
 	mediaType    string
@@ -2974,6 +3003,7 @@ type downloadRequest struct {
 	inflightKey  string
 	requestID    string
 	fn           func(session *DownloadSession) error
+	run          func(*TelegramBot) error
 }
 
 type Update struct {
@@ -3694,7 +3724,7 @@ func (b *TelegramBot) startDownloadWorker() {
 					if strings.TrimSpace(req.requestID) != "" {
 						b.markRequestRunning(req.requestID)
 					}
-					b.runDownload(req.chatID, req.fn, req.single, req.forceRefresh, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
+					b.runQueuedRequest(req)
 				}()
 			}
 		}()
@@ -4612,14 +4642,14 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 			_ = b.sendMessageWithReply(chatID, "Usage: /cover <apple-music-url> OR /cover <song|album|playlist|station|mv|artist> <id>", nil, replyToID)
 			return
 		}
-		b.handleCoverOnly(chatID, replyToID, target, false)
+		b.enqueueCoverTask(chatID, replyToID, target)
 	case "animatedcover", "motioncover":
 		target, err := resolveCommandTarget(args, "")
 		if err != nil {
 			_ = b.sendMessageWithReply(chatID, "Usage: /animatedcover <apple-music-url> OR /animatedcover <song|album|playlist|station> <id>", nil, replyToID)
 			return
 		}
-		b.handleAnimatedCoverOnly(chatID, replyToID, target)
+		b.enqueueAnimatedCoverTask(chatID, replyToID, target)
 	case "lyrics", "lyric":
 		if len(args) == 0 {
 			_ = b.sendMessageWithReply(chatID, "Usage: /lyrics <song-url|song-id|album-url|album <id>>", nil, replyToID)
@@ -4635,7 +4665,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 		}
 		switch target.MediaType {
 		case mediaTypeSong:
-			b.handleLyricsOnly(chatID, replyToID, target)
+			b.enqueueSongLyricsTask(chatID, replyToID, target)
 		case mediaTypeAlbum:
 			b.promptMediaTransfer(chatID, mediaTypeAlbumLyrics, target.ID, target.Storefront, "", replyToID, false)
 		default:
@@ -5529,6 +5559,26 @@ func (b *TelegramBot) handleCoverOnly(chatID int64, replyToID int, target *Apple
 	}
 }
 
+func (b *TelegramBot) enqueueCoverTask(chatID int64, replyToID int, target *AppleURLTarget) {
+	if target == nil || strings.TrimSpace(target.MediaType) == "" || strings.TrimSpace(target.ID) == "" {
+		_ = b.sendMessageWithReply(chatID, "Invalid Apple Music URL.", nil, replyToID)
+		return
+	}
+	settings := b.getChatSettings(chatID)
+	_ = b.enqueueTelegramTask(&downloadRequest{
+		chatID:       chatID,
+		replyToID:    replyToID,
+		single:       true,
+		taskType:     telegramTaskCover,
+		settings:     settings,
+		transferMode: transferModeOneByOne,
+		mediaType:    target.MediaType,
+		mediaID:      target.ID,
+		storefront:   resolveStorefront(target),
+		requestID:    b.nextRequestID(),
+	})
+}
+
 func (b *TelegramBot) handleAnimatedCoverOnly(chatID int64, replyToID int, target *AppleURLTarget) {
 	if target == nil {
 		_ = b.sendMessageWithReply(chatID, "Invalid target.", nil, replyToID)
@@ -5584,6 +5634,36 @@ func (b *TelegramBot) handleAnimatedCoverOnly(chatID int64, replyToID int, targe
 			return
 		}
 	}
+}
+
+func (b *TelegramBot) enqueueAnimatedCoverTask(chatID int64, replyToID int, target *AppleURLTarget) {
+	if target == nil || strings.TrimSpace(target.MediaType) == "" || strings.TrimSpace(target.ID) == "" {
+		_ = b.sendMessageWithReply(chatID, "Invalid target.", nil, replyToID)
+		return
+	}
+	switch target.MediaType {
+	case mediaTypeSong, mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation:
+	default:
+		_ = b.sendMessageWithReply(chatID, "animatedcover only supports song/album/playlist/station.", nil, replyToID)
+		return
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		_ = b.sendMessageWithReply(chatID, "animatedcover requires ffmpeg in PATH.", nil, replyToID)
+		return
+	}
+	settings := b.getChatSettings(chatID)
+	_ = b.enqueueTelegramTask(&downloadRequest{
+		chatID:       chatID,
+		replyToID:    replyToID,
+		single:       true,
+		taskType:     telegramTaskAnimatedCover,
+		settings:     settings,
+		transferMode: transferModeOneByOne,
+		mediaType:    target.MediaType,
+		mediaID:      target.ID,
+		storefront:   resolveStorefront(target),
+		requestID:    b.nextRequestID(),
+	})
 }
 
 func (b *TelegramBot) fetchLyricsOnly(songID string, storefront string, outputFormat string) (string, string, error) {
@@ -5652,6 +5732,10 @@ func uniqueName(existing map[string]struct{}, candidate string) string {
 }
 
 func (b *TelegramBot) exportAlbumLyrics(chatID int64, replyToID int, albumID string, storefront string, transferMode string) {
+	b.exportAlbumLyricsWithSettings(chatID, replyToID, albumID, storefront, transferMode, b.getChatSettings(chatID))
+}
+
+func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int, albumID string, storefront string, transferMode string, settings ChatDownloadSettings) {
 	if len(strings.TrimSpace(Config.MediaUserToken)) <= 50 {
 		_ = b.sendMessageWithReply(chatID, "Lyrics export requires media-user-token in config.yaml.", nil, replyToID)
 		return
@@ -5661,7 +5745,7 @@ func (b *TelegramBot) exportAlbumLyrics(chatID int64, replyToID int, albumID str
 		return
 	}
 	storefront = resolveStorefront(&AppleURLTarget{Storefront: storefront})
-	settings := b.getChatSettings(chatID)
+	settings = normalizeChatSettings(settings)
 	lyricsFormat := normalizeLyricsOutputFormat(settings.LyricsFormat)
 	if lyricsFormat == "" {
 		lyricsFormat = defaultTelegramLyricsFormat
@@ -5771,6 +5855,10 @@ func (b *TelegramBot) exportAlbumLyrics(chatID int64, replyToID int, albumID str
 }
 
 func (b *TelegramBot) handleLyricsOnly(chatID int64, replyToID int, target *AppleURLTarget) {
+	b.handleLyricsOnlyWithSettings(chatID, replyToID, target, b.getChatSettings(chatID))
+}
+
+func (b *TelegramBot) handleLyricsOnlyWithSettings(chatID int64, replyToID int, target *AppleURLTarget, settings ChatDownloadSettings) {
 	if target == nil || strings.TrimSpace(target.ID) == "" {
 		_ = b.sendMessageWithReply(chatID, "Invalid song target.", nil, replyToID)
 		return
@@ -5779,7 +5867,7 @@ func (b *TelegramBot) handleLyricsOnly(chatID int64, replyToID int, target *Appl
 		_ = b.sendMessageWithReply(chatID, "Lyrics export requires media-user-token in config.yaml.", nil, replyToID)
 		return
 	}
-	settings := b.getChatSettings(chatID)
+	settings = normalizeChatSettings(settings)
 	outputFormat := normalizeLyricsOutputFormat(settings.LyricsFormat)
 	if outputFormat == "" {
 		outputFormat = defaultTelegramLyricsFormat
@@ -5818,6 +5906,74 @@ func (b *TelegramBot) handleLyricsOnly(chatID int64, replyToID int, target *Appl
 	} else {
 		_ = b.sendMessageWithReply(chatID, "TTML exported from fallback lyrics source (translation/transliteration may be unavailable).", nil, replyToID)
 	}
+}
+
+func (b *TelegramBot) enqueueSongLyricsTask(chatID int64, replyToID int, target *AppleURLTarget) {
+	if target == nil || strings.TrimSpace(target.ID) == "" || target.MediaType != mediaTypeSong {
+		_ = b.sendMessageWithReply(chatID, "Invalid song target.", nil, replyToID)
+		return
+	}
+	if len(strings.TrimSpace(Config.MediaUserToken)) <= 50 {
+		_ = b.sendMessageWithReply(chatID, "Lyrics export requires media-user-token in config.yaml.", nil, replyToID)
+		return
+	}
+	settings := b.getChatSettings(chatID)
+	_ = b.enqueueTelegramTask(&downloadRequest{
+		chatID:       chatID,
+		replyToID:    replyToID,
+		single:       true,
+		taskType:     telegramTaskSongLyrics,
+		settings:     settings,
+		transferMode: transferModeOneByOne,
+		mediaType:    target.MediaType,
+		mediaID:      target.ID,
+		storefront:   resolveStorefront(target),
+		requestID:    b.nextRequestID(),
+	})
+}
+
+func (b *TelegramBot) enqueueAlbumLyricsTask(chatID int64, replyToID int, albumID string, storefront string, transferMode string) {
+	if strings.TrimSpace(albumID) == "" {
+		_ = b.sendMessageWithReply(chatID, "Album ID is empty.", nil, replyToID)
+		return
+	}
+	if len(strings.TrimSpace(Config.MediaUserToken)) <= 50 {
+		_ = b.sendMessageWithReply(chatID, "Lyrics export requires media-user-token in config.yaml.", nil, replyToID)
+		return
+	}
+	settings := b.getChatSettings(chatID)
+	_ = b.enqueueTelegramTask(&downloadRequest{
+		chatID:       chatID,
+		replyToID:    replyToID,
+		single:       false,
+		taskType:     telegramTaskAlbumLyrics,
+		settings:     settings,
+		transferMode: transferMode,
+		mediaType:    mediaTypeAlbum,
+		mediaID:      albumID,
+		storefront:   resolveStorefront(&AppleURLTarget{Storefront: storefront}),
+		requestID:    b.nextRequestID(),
+	})
+}
+
+func (b *TelegramBot) enqueueArtistAssetsTask(chatID int64, replyToID int, artistID string, storefront string, transferMode string) {
+	if strings.TrimSpace(artistID) == "" {
+		_ = b.sendMessageWithReply(chatID, "Artist ID is empty.", nil, replyToID)
+		return
+	}
+	settings := b.getChatSettings(chatID)
+	_ = b.enqueueTelegramTask(&downloadRequest{
+		chatID:       chatID,
+		replyToID:    replyToID,
+		single:       false,
+		taskType:     telegramTaskArtistAssets,
+		settings:     settings,
+		transferMode: transferMode,
+		mediaType:    mediaTypeArtist,
+		mediaID:      artistID,
+		storefront:   resolveStorefront(&AppleURLTarget{Storefront: storefront}),
+		requestID:    b.nextRequestID(),
+	})
 }
 
 func normalizeArtistRelationship(relationship string) string {
@@ -6009,10 +6165,10 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 		switch mode {
 		case transferModeOneByOne:
 			_ = b.editMessageText(chatID, messageID, "Artist assets export mode: one by one.", nil)
-			go b.exportArtistAssets(chatID, replyToID, mediaID, pending.Storefront, transferModeOneByOne)
+			b.enqueueArtistAssetsTask(chatID, replyToID, mediaID, pending.Storefront, transferModeOneByOne)
 		case transferModeZip:
 			_ = b.editMessageText(chatID, messageID, "Artist assets export mode: ZIP.", nil)
-			go b.exportArtistAssets(chatID, replyToID, mediaID, pending.Storefront, transferModeZip)
+			b.enqueueArtistAssetsTask(chatID, replyToID, mediaID, pending.Storefront, transferModeZip)
 		default:
 			_ = b.editMessageText(chatID, messageID, "Unknown artist assets export mode.", nil)
 		}
@@ -6023,10 +6179,10 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 		switch mode {
 		case transferModeOneByOne:
 			_ = b.editMessageText(chatID, messageID, "Lyrics export mode: one by one.", nil)
-			go b.exportAlbumLyrics(chatID, replyToID, mediaID, pending.Storefront, transferModeOneByOne)
+			b.enqueueAlbumLyricsTask(chatID, replyToID, mediaID, pending.Storefront, transferModeOneByOne)
 		case transferModeZip:
 			_ = b.editMessageText(chatID, messageID, "Lyrics export mode: ZIP.", nil)
-			go b.exportAlbumLyrics(chatID, replyToID, mediaID, pending.Storefront, transferModeZip)
+			b.enqueueAlbumLyricsTask(chatID, replyToID, mediaID, pending.Storefront, transferModeZip)
 		default:
 			_ = b.editMessageText(chatID, messageID, "Unknown lyrics export mode.", nil)
 		}
@@ -6533,32 +6689,107 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 	}
 }
 
-func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, forceRefresh bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string, inflightKey string, fn func(session *DownloadSession) error) bool {
-	transferMode = normalizeTransferModeForMedia(transferMode, mediaType, single)
-	settings = normalizeChatSettings(settings)
+func (b *TelegramBot) buildQueuedRequestRunner(req *downloadRequest) error {
+	if b == nil || req == nil {
+		return fmt.Errorf("invalid request")
+	}
+	req.taskType = normalizeTelegramTaskType(req.taskType)
+	req.settings = normalizeChatSettings(req.settings)
+	if strings.TrimSpace(req.storefront) == "" {
+		req.storefront = Config.Storefront
+	}
+	if strings.TrimSpace(req.mediaType) == "" || strings.TrimSpace(req.mediaID) == "" {
+		return fmt.Errorf("invalid request: missing media type/id")
+	}
+	if req.run != nil {
+		return nil
+	}
+	switch req.taskType {
+	case telegramTaskDownload:
+		req.transferMode = normalizeTransferModeForMedia(req.transferMode, req.mediaType, req.single)
+		if req.fn == nil {
+			fn, err := b.buildDownloadWorkerFn(req.mediaType, req.mediaID, req.storefront)
+			if err != nil {
+				return err
+			}
+			req.fn = fn
+		}
+		req.run = func(bot *TelegramBot) error {
+			bot.runDownload(req.chatID, req.fn, req.single, req.forceRefresh, req.replyToID, req.settings, req.transferMode, req.mediaType, req.mediaID)
+			return nil
+		}
+	case telegramTaskCover:
+		req.single = true
+		req.transferMode = transferModeOneByOne
+		target := &AppleURLTarget{MediaType: req.mediaType, ID: req.mediaID, Storefront: req.storefront}
+		req.run = func(bot *TelegramBot) error {
+			bot.handleCoverOnly(req.chatID, req.replyToID, target, false)
+			return nil
+		}
+	case telegramTaskAnimatedCover:
+		req.single = true
+		req.transferMode = transferModeOneByOne
+		target := &AppleURLTarget{MediaType: req.mediaType, ID: req.mediaID, Storefront: req.storefront}
+		req.run = func(bot *TelegramBot) error {
+			bot.handleAnimatedCoverOnly(req.chatID, req.replyToID, target)
+			return nil
+		}
+	case telegramTaskSongLyrics:
+		req.single = true
+		req.transferMode = transferModeOneByOne
+		target := &AppleURLTarget{MediaType: req.mediaType, ID: req.mediaID, Storefront: req.storefront}
+		settings := req.settings
+		req.run = func(bot *TelegramBot) error {
+			bot.handleLyricsOnlyWithSettings(req.chatID, req.replyToID, target, settings)
+			return nil
+		}
+	case telegramTaskAlbumLyrics:
+		req.single = false
+		if req.transferMode != transferModeZip {
+			req.transferMode = transferModeOneByOne
+		}
+		settings := req.settings
+		req.run = func(bot *TelegramBot) error {
+			bot.exportAlbumLyricsWithSettings(req.chatID, req.replyToID, req.mediaID, req.storefront, req.transferMode, settings)
+			return nil
+		}
+	case telegramTaskArtistAssets:
+		req.single = false
+		if req.transferMode != transferModeZip {
+			req.transferMode = transferModeOneByOne
+		}
+		req.run = func(bot *TelegramBot) error {
+			bot.exportArtistAssets(req.chatID, req.replyToID, req.mediaID, req.storefront, req.transferMode)
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported task type: %s", req.taskType)
+	}
+	return nil
+}
+
+func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage string, queueFullMessage string) bool {
+	if req == nil {
+		return false
+	}
+	if err := b.buildQueuedRequestRunner(req); err != nil {
+		if req.chatID != 0 {
+			_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Failed: %v", err), nil, req.replyToID)
+		}
+		return false
+	}
 	if b.resourceGuard != nil {
 		if ok, reason := b.resourceGuard.allow(); !ok {
-			msg := "Resource pressure detected. New download tasks are temporarily blocked."
+			msg := strings.TrimSpace(blockedMessage)
+			if msg == "" {
+				msg = "Resource pressure detected. New tasks are temporarily blocked."
+			}
 			if strings.TrimSpace(reason) != "" {
 				msg = msg + " " + reason
 			}
-			_ = b.sendMessageWithReply(chatID, msg, nil, replyToID)
+			_ = b.sendMessageWithReply(req.chatID, msg, nil, req.replyToID)
 			return false
 		}
-	}
-	req := &downloadRequest{
-		chatID:       chatID,
-		replyToID:    replyToID,
-		single:       single,
-		forceRefresh: forceRefresh,
-		settings:     settings,
-		transferMode: transferMode,
-		mediaType:    mediaType,
-		mediaID:      mediaID,
-		storefront:   storefront,
-		inflightKey:  inflightKey,
-		requestID:    b.nextRequestID(),
-		fn:           fn,
 	}
 	b.queueMu.Lock()
 	queueLen := len(b.downloadQueue)
@@ -6569,7 +6800,11 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 	b.queueMu.Unlock()
 
 	if queueFull {
-		_ = b.sendMessageWithReply(chatID, "Download queue is full. Please try again later.", nil, replyToID)
+		msg := strings.TrimSpace(queueFullMessage)
+		if msg == "" {
+			msg = "Task queue is full. Please try again later."
+		}
+		_ = b.sendMessageWithReply(req.chatID, msg, nil, req.replyToID)
 		return false
 	}
 	b.trackQueuedRequest(req)
@@ -6577,13 +6812,61 @@ func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, 
 	case b.downloadQueue <- req:
 	default:
 		b.untrackRequest(req.requestID)
-		_ = b.sendMessageWithReply(chatID, "Download queue is full. Please try again later.", nil, replyToID)
+		msg := strings.TrimSpace(queueFullMessage)
+		if msg == "" {
+			msg = "Task queue is full. Please try again later."
+		}
+		_ = b.sendMessageWithReply(req.chatID, msg, nil, req.replyToID)
 		return false
 	}
 	if queueLen > 0 || activeWorkers >= workerLimit {
-		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", queueLen+1, activeWorkers, workerLimit), nil, replyToID)
+		_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", queueLen+1, activeWorkers, workerLimit), nil, req.replyToID)
 	}
 	return true
+}
+
+func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, forceRefresh bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string, inflightKey string, fn func(session *DownloadSession) error) bool {
+	req := &downloadRequest{
+		chatID:       chatID,
+		replyToID:    replyToID,
+		single:       single,
+		forceRefresh: forceRefresh,
+		taskType:     telegramTaskDownload,
+		settings:     settings,
+		transferMode: transferMode,
+		mediaType:    mediaType,
+		mediaID:      mediaID,
+		storefront:   storefront,
+		inflightKey:  inflightKey,
+		requestID:    b.nextRequestID(),
+		fn:           fn,
+	}
+	return b.enqueueTaskRequest(req, "Resource pressure detected. New download tasks are temporarily blocked.", "Download queue is full. Please try again later.")
+}
+
+func (b *TelegramBot) enqueueTelegramTask(req *downloadRequest) bool {
+	return b.enqueueTaskRequest(req, "Resource pressure detected. New tasks are temporarily blocked.", "Task queue is full. Please try again later.")
+}
+
+func (b *TelegramBot) runQueuedRequest(req *downloadRequest) {
+	if req == nil {
+		return
+	}
+	if err := b.buildQueuedRequestRunner(req); err != nil {
+		if req.chatID != 0 {
+			_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Failed: %v", err), nil, req.replyToID)
+		}
+		return
+	}
+	if req.run == nil {
+		if req.chatID != 0 {
+			_ = b.sendMessageWithReply(req.chatID, "Failed: task runner is unavailable", nil, req.replyToID)
+		}
+		return
+	}
+	if err := req.run(b); err != nil && req.chatID != 0 {
+		_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Failed: %v", err), nil, req.replyToID)
+	}
 }
 
 func (b *TelegramBot) trySendCachedTrack(chatID int64, replyToID int, trackID string, format string) bool {

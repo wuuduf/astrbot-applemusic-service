@@ -168,6 +168,68 @@ func TestTelegramRuntimeStateRestoreQueuesRecoveredRequests(t *testing.T) {
 	}
 }
 
+func TestTelegramRuntimeStateRestoreQueuesRecoveredHeavyTaskRequests(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "telegram-state.json")
+	state := telegramPersistedState{
+		Version: telegramStateVersion,
+		Requests: []telegramPersistedRequest{
+			{
+				RequestID:    "req-cover-1",
+				ChatID:       202,
+				ReplyToID:    5,
+				Single:       true,
+				TaskType:     telegramTaskCover,
+				Settings:     ChatDownloadSettings{Format: telegramFormatAlac, SettingsInited: true},
+				TransferMode: transferModeOneByOne,
+				MediaType:    mediaTypeAlbum,
+				MediaID:      "album-123",
+				Storefront:   "us",
+				State:        "queued",
+				UpdatedAt:    time.Now(),
+			},
+		},
+	}
+	payload, err := jsonMarshalIndentForTest(state)
+	if err != nil {
+		t.Fatalf("marshal state failed: %v", err)
+	}
+	if err := os.WriteFile(statePath, payload, 0644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	b := &TelegramBot{
+		stateFile:          statePath,
+		appleToken:         "token",
+		pending:            make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+		chatSettings:       make(map[int64]ChatDownloadSettings),
+		inflightDownloads:  make(map[string]struct{}),
+		activeRequests:     make(map[string]telegramPersistedRequest),
+		downloadQueue:      make(chan *downloadRequest, 2),
+		stateSave:          make(chan struct{}, 1),
+	}
+	b.restoreRuntimeState()
+
+	if len(b.downloadQueue) != 1 {
+		t.Fatalf("expected recovered heavy request in queue, got %d", len(b.downloadQueue))
+	}
+	req := <-b.downloadQueue
+	if req == nil {
+		t.Fatalf("expected non-nil request")
+	}
+	if req.taskType != telegramTaskCover {
+		t.Fatalf("expected recovered cover task, got %q", req.taskType)
+	}
+	if req.mediaType != mediaTypeAlbum || req.mediaID != "album-123" {
+		t.Fatalf("unexpected recovered heavy request: %+v", req)
+	}
+	if req.run == nil {
+		t.Fatalf("expected recovered heavy request runner to be rebuilt")
+	}
+}
+
 func TestTelegramResourceGuardLowDisk(t *testing.T) {
 	guard := &telegramResourceGuard{
 		minDiskFreeBytes: 100,
@@ -275,6 +337,64 @@ func TestDownloadWorkerContinuesAfterTaskPanic(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("second task did not run after first task panic")
+	}
+	close(b.downloadQueue)
+}
+
+func TestTaskWorkerContinuesAfterHeavyTaskPanic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/sendMessage"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer server.Close()
+
+	b := &TelegramBot{
+		token:             "test",
+		apiBase:           server.URL,
+		client:            server.Client(),
+		pollClient:        server.Client(),
+		downloadQueue:     make(chan *downloadRequest, 4),
+		workerLimit:       1,
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	b.startDownloadWorker()
+
+	done := make(chan struct{})
+	b.downloadQueue <- &downloadRequest{
+		chatID:    1,
+		replyToID: 21,
+		requestID: "panic-heavy-task",
+		taskType:  telegramTaskCover,
+		mediaType: mediaTypeAlbum,
+		mediaID:   "album-panic",
+		run: func(*TelegramBot) error {
+			panic("heavy task panic")
+		},
+	}
+	b.downloadQueue <- &downloadRequest{
+		chatID:    1,
+		replyToID: 22,
+		requestID: "next-heavy-task",
+		taskType:  telegramTaskCover,
+		mediaType: mediaTypeAlbum,
+		mediaID:   "album-next",
+		run: func(*TelegramBot) error {
+			close(done)
+			return nil
+		},
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("second heavy task did not run after first task panic")
 	}
 	close(b.downloadQueue)
 }

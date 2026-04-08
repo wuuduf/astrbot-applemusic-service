@@ -19,6 +19,7 @@ type telegramPersistedRequest struct {
 	ReplyToID    int                  `json:"reply_to_id"`
 	Single       bool                 `json:"single"`
 	ForceRefresh bool                 `json:"force_refresh,omitempty"`
+	TaskType     string               `json:"task_type,omitempty"`
 	Settings     ChatDownloadSettings `json:"settings"`
 	TransferMode string               `json:"transfer_mode"`
 	MediaType    string               `json:"media_type"`
@@ -126,6 +127,7 @@ func (b *TelegramBot) trackQueuedRequest(req *downloadRequest) {
 		ReplyToID:    req.replyToID,
 		Single:       req.single,
 		ForceRefresh: req.forceRefresh,
+		TaskType:     normalizeTelegramTaskType(req.taskType),
 		Settings:     normalizeChatSettings(req.settings),
 		TransferMode: req.transferMode,
 		MediaType:    req.mediaType,
@@ -504,28 +506,26 @@ func (b *TelegramBot) buildRecoveredDownloadRequest(request telegramPersistedReq
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
-	fn, err := b.buildDownloadWorkerFn(mediaType, mediaID, storefront)
-	if err != nil {
-		return nil, err
-	}
 	settings := normalizeChatSettings(request.Settings)
-	transferMode := normalizeTransferModeForMedia(request.TransferMode, mediaType, request.Single)
 	req := &downloadRequest{
 		chatID:       request.ChatID,
 		replyToID:    request.ReplyToID,
 		single:       request.Single,
 		forceRefresh: request.ForceRefresh,
+		taskType:     normalizeTelegramTaskType(request.TaskType),
 		settings:     settings,
-		transferMode: transferMode,
+		transferMode: request.TransferMode,
 		mediaType:    mediaType,
 		mediaID:      mediaID,
 		storefront:   storefront,
 		inflightKey:  strings.TrimSpace(request.InflightKey),
 		requestID:    strings.TrimSpace(request.RequestID),
-		fn:           fn,
 	}
 	if req.requestID == "" {
 		req.requestID = b.nextRequestID()
+	}
+	if err := b.buildQueuedRequestRunner(req); err != nil {
+		return nil, err
 	}
 	return req, nil
 }

@@ -501,6 +501,82 @@ func TestEnqueueSongDownloadForceRefreshDoesNotPurgeCachesWhenQueueIsFull(t *tes
 	}
 }
 
+func TestHandleCommandCoverQueuesHeavyTask(t *testing.T) {
+	bot := &TelegramBot{
+		downloadQueue: make(chan *downloadRequest, 2),
+		workerLimit:   1,
+		chatSettings:  make(map[int64]ChatDownloadSettings),
+	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
+
+	bot.handleCommand(42, "private", "cover", []string{"song", "12345"}, 7)
+
+	if len(bot.downloadQueue) != 1 {
+		t.Fatalf("expected cover task to be queued, got %d", len(bot.downloadQueue))
+	}
+	req := <-bot.downloadQueue
+	if req == nil {
+		t.Fatalf("expected non-nil queued request")
+	}
+	if req.taskType != telegramTaskCover {
+		t.Fatalf("expected cover task type, got %q", req.taskType)
+	}
+	if req.mediaType != mediaTypeSong || req.mediaID != "12345" {
+		t.Fatalf("unexpected queued cover request: %+v", req)
+	}
+}
+
+func TestHandleMediaTransferQueuesArtistAssetsTask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:         "test-token",
+		apiBase:       server.URL,
+		client:        server.Client(),
+		downloadQueue: make(chan *downloadRequest, 2),
+		workerLimit:   1,
+		chatSettings:  make(map[int64]ChatDownloadSettings),
+		pendingTransfers: map[int64]map[int]*PendingTransfer{
+			42: {
+				100: {
+					MediaType:        mediaTypeArtistAsset,
+					MediaID:          "artist-123",
+					Storefront:       "us",
+					ReplyToMessageID: 7,
+					MessageID:        100,
+					CreatedAt:        time.Now(),
+				},
+			},
+		},
+	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
+
+	bot.handleMediaTransfer(42, 100, transferModeZip)
+
+	if len(bot.downloadQueue) != 1 {
+		t.Fatalf("expected artist assets task to be queued, got %d", len(bot.downloadQueue))
+	}
+	req := <-bot.downloadQueue
+	if req == nil {
+		t.Fatalf("expected non-nil queued request")
+	}
+	if req.taskType != telegramTaskArtistAssets {
+		t.Fatalf("expected artist assets task type, got %q", req.taskType)
+	}
+	if req.mediaType != mediaTypeArtist || req.mediaID != "artist-123" {
+		t.Fatalf("unexpected queued artist assets request: %+v", req)
+	}
+	if req.transferMode != transferModeZip {
+		t.Fatalf("expected zip transfer mode, got %q", req.transferMode)
+	}
+}
+
 func TestSendAudioFileCleansCompressedAndThumbTemps(t *testing.T) {
 	tmpDir := t.TempDir()
 	audioPath := filepath.Join(tmpDir, "track.flac")
