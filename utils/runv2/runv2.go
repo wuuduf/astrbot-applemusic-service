@@ -228,7 +228,13 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	if err != nil {
 		return err
 	}
-	defer ofh.Close()
+	cleanupOnError := true
+	defer func() {
+		_ = ofh.Close()
+		if cleanupOnError {
+			_ = os.Remove(outfile)
+		}
+	}()
 	outBuf := bufio.NewWriter(ofh)
 	init, offset, err := ReadInitSegment(inBuf)
 	if err != nil {
@@ -333,6 +339,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	if err != nil {
 		return err
 	}
+	cleanupOnError = false
 	return nil
 }
 

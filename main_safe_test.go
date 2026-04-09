@@ -102,6 +102,25 @@ func TestDownloadSessionShouldReuseExistingFiles(t *testing.T) {
 	}
 }
 
+func TestFileExistsNonEmptyRemovesZeroByteFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyPath := filepath.Join(tmpDir, "empty.m4a")
+	if err := os.WriteFile(emptyPath, nil, 0644); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+
+	exists, err := fileExistsNonEmpty(emptyPath)
+	if err != nil {
+		t.Fatalf("fileExistsNonEmpty failed: %v", err)
+	}
+	if exists {
+		t.Fatalf("expected empty file to be treated as unusable")
+	}
+	if _, err := os.Stat(emptyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected empty file to be removed, stat err=%v", err)
+	}
+}
+
 func TestApplyTelegramAudioEmbeddingPolicy(t *testing.T) {
 	base := structs.ConfigSet{
 		LrcFormat:           "lrc",
@@ -1066,6 +1085,34 @@ func TestHandleTrackReuseStageRecordsSourceFormatWhenConversionFails(t *testing.
 	}
 	if meta.Format != telegramFormatAlac {
 		t.Fatalf("expected ALAC format after failed conversion, got %s", meta.Format)
+	}
+}
+
+func TestHandleTrackReuseStageSkipsAndRemovesEmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	trackPath := filepath.Join(tmpDir, "song.m4a")
+	if err := os.WriteFile(trackPath, nil, 0644); err != nil {
+		t.Fatalf("write empty audio: %v", err)
+	}
+
+	session := newDownloadSession(structs.ConfigSet{})
+	track := &task.Track{
+		SaveDir: tmpDir,
+		PreID:   "album-1",
+		TaskNum: 1,
+	}
+	ctx := &trackDownloadContext{
+		session:   session,
+		cfg:       &session.Config,
+		track:     track,
+		trackPath: trackPath,
+	}
+
+	if handleTrackReuseStage(ctx) {
+		t.Fatalf("expected empty file to be rejected for reuse")
+	}
+	if _, err := os.Stat(trackPath); !os.IsNotExist(err) {
+		t.Fatalf("expected empty reusable file to be removed, stat err=%v", err)
 	}
 }
 

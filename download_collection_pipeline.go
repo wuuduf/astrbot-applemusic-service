@@ -367,7 +367,7 @@ func downloadStationStreamStage(ctx *stationDownloadContext) error {
 		})
 	}
 	if isInArray(ctx.session.OkDict[ctx.station.ID], 1) {
-		if exists, _ := fileExists(trackPath); exists {
+		if exists, _ := fileExistsNonEmpty(trackPath); exists {
 			recordStationStream()
 		}
 		ctx.session.Counter.Success++
@@ -375,7 +375,7 @@ func downloadStationStreamStage(ctx *stationDownloadContext) error {
 	}
 	exists := false
 	if ctx.session.shouldReuseExistingFiles() {
-		exists, _ = fileExists(trackPath)
+		exists, _ = fileExistsNonEmpty(trackPath)
 	}
 	if exists {
 		recordStationStream()

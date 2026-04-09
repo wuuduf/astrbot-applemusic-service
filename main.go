@@ -425,6 +425,29 @@ func fileExists(path string) (bool, error) {
 	return false, err
 }
 
+func fileExistsNonEmpty(path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.IsDir() {
+		return false, nil
+	}
+	if info.Size() > 0 {
+		return true, nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return false, nil
+}
+
 func checkUrl(url string) (string, string) {
 	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/album|\/album\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
 	matches := pat.FindAllStringSubmatch(url, -1)
@@ -4612,19 +4635,44 @@ func (b *TelegramBot) handleSelection(chatID int64, messageID int, choice int) {
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
+	selectedID := selected.ID
+	if target, err := parseAppleMusicURL(strings.TrimSpace(selected.URL)); err == nil && target != nil {
+		switch pending.Kind {
+		case "song":
+			if target.MediaType == mediaTypeSong {
+				storefront = firstNonEmpty(target.Storefront, storefront)
+				selectedID = firstNonEmpty(target.ID, selectedID)
+			}
+		case "album", "artist_album":
+			if target.MediaType == mediaTypeAlbum {
+				storefront = firstNonEmpty(target.Storefront, storefront)
+				selectedID = firstNonEmpty(target.ID, selectedID)
+			}
+		case "artist_mv":
+			if target.MediaType == mediaTypeMusicVideo {
+				storefront = firstNonEmpty(target.Storefront, storefront)
+				selectedID = firstNonEmpty(target.ID, selectedID)
+			}
+		case "artist":
+			if target.MediaType == mediaTypeArtist {
+				storefront = firstNonEmpty(target.Storefront, storefront)
+				selectedID = firstNonEmpty(target.ID, selectedID)
+			}
+		}
+	}
 	// Selection confirmed: remove the search list message and clear pending state.
 	b.clearPendingByMessage(chatID, messageID)
 	_ = b.deleteMessage(chatID, messageID)
 	switch pending.Kind {
 	case "song":
-		setSearchMeta(selected.ID, selected.Name, selected.Artist)
-		b.queueDownloadSongWithStorefront(chatID, selected.ID, storefront, replyToID)
+		setSearchMeta(selectedID, selected.Name, selected.Artist)
+		b.queueDownloadSongWithStorefront(chatID, selectedID, storefront, replyToID)
 	case "album", "artist_album":
-		b.queueDownloadAlbumWithStorefront(chatID, selected.ID, storefront, replyToID)
+		b.queueDownloadAlbumWithStorefront(chatID, selectedID, storefront, replyToID)
 	case "artist_mv":
-		b.queueDownloadMusicVideoWithStorefront(chatID, selected.ID, storefront, replyToID, false)
+		b.queueDownloadMusicVideoWithStorefront(chatID, selectedID, storefront, replyToID, false)
 	case "artist":
-		b.startArtistSelection(chatID, selected.ID, selected.Name, storefront, replyToID)
+		b.startArtistSelection(chatID, selectedID, selected.Name, storefront, replyToID)
 	}
 }
 
